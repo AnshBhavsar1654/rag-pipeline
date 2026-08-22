@@ -1,0 +1,101 @@
+# ============================================================================
+# RAG Pipeline Configuration
+# ============================================================================
+# To use this pipeline with YOUR documents, simply update the 'sources' list
+# below and run:  python ingest.py  →  python app.py
+# ============================================================================
+
+# --- Document Sources ---
+# Supported: file paths (pdf, txt, md, docx, csv, html), URLs, directories
+documents:
+  sources:
+    - "./sample_docs/"   # Put your documents in this folder
+    # - "https://example.com/article"
+    # - "./my_report.pdf"
+    # - "./data/notes.md"
+
+# --- Chunking ---
+chunking:
+  chunk_size: 1000          # Characters per chunk
+  chunk_overlap: 200        # Overlap between chunks
+  use_tiktoken: true        # Use tiktoken-aware splitting
+  tiktoken_encoding: "cl100k_base"
+
+# --- Embedding Model ---
+embedding:
+  provider: "google"         # google | openai | huggingface
+  model: "models/gemini-embedding-001"
+  # For OpenAI:
+  # provider: "openai"
+  # model: "text-embedding-3-small"
+  # For HuggingFace (local, free):
+  # provider: "huggingface"
+  # model: "sentence-transformers/all-MiniLM-L6-v2"
+
+# --- Vector Store ---
+vectorstore:
+  provider: "chroma"        # chroma (default)
+  persist_directory: "./vectorstore_db"
+  collection_name: "rag_collection"
+
+# --- LLM ---
+llm:
+  provider: "google"         # google | groq | openai | ollama
+  model: "gemini-3.6-flash"  # Model name
+  temperature: 0.1
+  max_tokens: 2048
+  # For Groq (fast, free tier):
+  # provider: "groq"
+  # model: "llama-3.3-70b-versatile"
+  # For OpenAI:
+  # provider: "openai"
+  # model: "gpt-4o-mini"
+  # For Ollama (local):
+  # provider: "ollama"
+  # model: "llama3"
+  # base_url: "http://localhost:11434"
+
+# --- Retrieval Strategy ---
+retrieval:
+  strategy: "rag_fusion"    # simple | multi_query | rag_fusion | hyde
+  top_k: 5                  # Number of documents to retrieve
+  
+  # Multi-query settings
+  multi_query:
+    num_queries: 4           # Number of query variants to generate
+
+  # RAG-Fusion settings  
+  rag_fusion:
+    num_queries: 4           # Number of query variants
+    rrf_k: 60               # RRF constant (higher = more weight to lower ranks)
+
+  # HyDE settings
+  hyde:
+    hypothesis_prompt: "Please write a detailed passage to answer the question:\nQuestion: {question}\nPassage:"
+
+# --- Re-ranking (optional) ---
+reranking:
+  enabled: false
+  provider: "cross_encoder"  # cross_encoder | cohere
+  model: "cross-encoder/ms-marco-MiniLM-L-6-v2"
+  top_k: 3                  # Re-rank to top K results
+  # For Cohere:
+  # provider: "cohere"
+  # model: "rerank-english-v3.0"
+
+# --- Chat / Conversation ---
+chat:
+  system_prompt: |
+    You are a helpful AI assistant that answers questions based on the provided context.
+    If you don't know the answer or the context doesn't contain relevant information,
+    say so honestly. Always be concise and accurate.
+  memory_window: 10          # Number of past exchanges to keep in memory
+  show_sources: true         # Show source documents in responses
+
+# --- Gradio UI ---
+ui:
+  title: "RAG Chatbot"
+  description: "Ask questions about your documents"
+  theme: "soft"              # soft | default | glass
+  share: false               # Create public Gradio link
+  port: 7860
