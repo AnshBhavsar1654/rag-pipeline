@@ -2,10 +2,6 @@
 
 A state-of-the-art, modular Retrieval-Augmented Generation pipeline. **Swap your document, get a chatbot instantly.**
 
-> Built from [RAG from Scratch](https://youtube.com/playlist?list=PLfaIDFEXuae2LXbO1_PKyVJiQ23ZztA0x) techniques (Parts 1–18), consolidated into a production-ready project.
-
-![RAG Architecture](https://github.com/langchain-ai/rag-from-scratch/assets/122662504/54a2d76c-b07e-49e7-b4ce-fc45667360a1)
-
 ---
 
 ## ✨ Features
@@ -125,20 +121,19 @@ RAG/
 │   ├── embeddings/             # Embedding model factory
 │   ├── vectorstore/            # Chroma with persistence
 │   ├── retrieval/              # Strategy pattern
-│   │   ├── multi_query.py      # Multi-query (Part 5)
-│   │   ├── rag_fusion.py       # RAG-Fusion + RRF (Parts 6, 15)
-│   │   ├── hyde.py             # HyDE (Part 9)
+│   │   ├── multi_query.py      # Multi-query retrieval
+│   │   ├── rag_fusion.py       # RAG-Fusion + RRF
+│   │   ├── hyde.py             # HyDE
 │   │   └── reranker.py         # Re-ranking layer
 │   ├── query_transform/        # Query transformations
-│   │   ├── decomposition.py    # Question decomposition (Part 7)
-│   │   └── step_back.py        # Step-back prompting (Part 8)
+│   │   ├── decomposition.py    # Question decomposition
+│   │   └── step_back.py        # Step-back prompting
 │   ├── generation/             # LLM generation
 │   ├── pipeline/               # Main orchestrator
 │   └── chat/                   # Conversational memory
 ├── app.py                      # Gradio web UI
 ├── cli.py                      # Terminal chatbot
-├── ingest.py                   # Document ingestion
-└── notebooks/                  # Original reference notebooks
+├── ingest.py                     # Document ingestion
 ```
 
 ### Pipeline Flow
@@ -240,17 +235,3 @@ reranking:
   model: "cross-encoder/ms-marco-MiniLM-L-6-v2"
   top_k: 3
 ```
-
----
-
-## 📓 Reference Notebooks
-
-The original "RAG from Scratch" notebooks are preserved in `notebooks/`:
-
-| Notebook | Topics |
-|---|---|
-| Parts 1–4 | Indexing, Retrieval, Generation basics |
-| Parts 5–9 | Multi-Query, RAG-Fusion, Decomposition, Step-Back, HyDE |
-| Parts 10–11 | Routing, Query Construction |
-| Parts 12–14 | Multi-representation Indexing, RAPTOR, ColBERT |
-| Parts 15–18 | Re-ranking, CRAG, Long Context |
