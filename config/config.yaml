@@ -23,8 +23,8 @@ chunking:
 
 # --- Embedding Model ---
 embedding:
-  provider: "google"         # google | openai | huggingface
-  model: "models/gemini-embedding-001"
+  provider: "huggingface"     # google | openai | huggingface
+  model: "sentence-transformers/all-MiniLM-L6-v2"
   # For OpenAI:
   # provider: "openai"
   # model: "text-embedding-3-small"

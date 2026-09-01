@@ -11,7 +11,7 @@ from langchain_core.documents import Document
 from langchain_core.language_models import BaseChatModel
 
 from src.config import RAGConfig, load_config
-from src.document_loaders.loader import load_documents
+from src.document_loaders.loader import load_documents, _load_from_file
 from src.chunking.splitter import split_documents
 from src.embeddings.embedder import create_embeddings
 from src.vectorstore.store import create_vectorstore, get_retriever
@@ -92,6 +92,63 @@ class RAGPipeline:
         print("\n" + "=" * 60)
         print("  [OK] Ingestion complete!")
         print("=" * 60 + "\n")
+
+    def ingest_files(self, file_paths: list[str]) -> str:
+        """Ingest uploaded files into the existing vector store.
+
+        Loads, chunks, embeds, and adds the documents to the running
+        vector store so the chatbot can answer questions about them.
+
+        Returns a status message describing what happened.
+        """
+        from pathlib import Path
+
+        if not file_paths:
+            return "No files provided."
+
+        # Ensure vector store and embeddings are initialized
+        embeddings = create_embeddings(self.config.embedding)
+        if self._vectorstore is None:
+            self._vectorstore = create_vectorstore(
+                self.config.vectorstore, embeddings,
+            )
+
+        # Load documents from each file
+        all_docs = []
+        loaded_names = []
+        failed_names = []
+        for fp in file_paths:
+            path = Path(fp)
+            if not path.is_file():
+                failed_names.append(path.name)
+                continue
+            docs = _load_from_file(path)
+            if docs:
+                all_docs.extend(docs)
+                loaded_names.append(path.name)
+            else:
+                failed_names.append(path.name)
+
+        if not all_docs:
+            return f"Failed to load any documents. Unsupported files: {', '.join(failed_names)}"
+
+        # Split into chunks
+        chunks = split_documents(all_docs, self.config.chunking)
+
+        # Add to existing vector store
+        self._vectorstore.add_documents(chunks)
+
+        # Refresh retriever so new docs are immediately searchable
+        self._base_retriever = get_retriever(
+            self._vectorstore,
+            top_k=self.config.retrieval.top_k,
+        )
+        self._retriever = self._create_retriever()
+
+        msg = f"Successfully ingested {len(loaded_names)} file(s) ({len(chunks)} chunks): {', '.join(loaded_names)}"
+        if failed_names:
+            msg += f"\nFailed: {', '.join(failed_names)}"
+        return msg
 
     # -----------------------------------------------------------------
     # Loading (for query mode)
