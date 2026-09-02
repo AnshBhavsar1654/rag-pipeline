@@ -67,8 +67,11 @@ class RAGPipeline:
         print("  [IN] RAG Pipeline — Document Ingestion")
         print("=" * 60)
 
-        # 1. Load documents
-        documents = load_documents(self.config.documents)
+        # 1. Load documents (with table/image extraction)
+        documents = load_documents(
+            self.config.documents,
+            extraction_config=self.config.extraction,
+        )
         if not documents:
             print("\n[ERROR] No documents found. Check your config.yaml sources.")
             return
@@ -122,7 +125,7 @@ class RAGPipeline:
             if not path.is_file():
                 failed_names.append(path.name)
                 continue
-            docs = _load_from_file(path)
+            docs = _load_from_file(path, extraction_config=self.config.extraction)
             if docs:
                 all_docs.extend(docs)
                 loaded_names.append(path.name)

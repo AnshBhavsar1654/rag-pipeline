@@ -5,6 +5,8 @@ Automatically detects file types and loads documents from:
 - Files: PDF, TXT, MD, DOCX, CSV, HTML
 - URLs: Web pages
 - Directories: Recursively loads all supported files
+
+For PDFs and DOCX: also extracts tables (→ Markdown) and images (→ OCR text).
 """
 
 from __future__ import annotations
@@ -15,7 +17,7 @@ from urllib.parse import urlparse
 
 from langchain_core.documents import Document
 
-from src.config import DocumentsConfig
+from src.config import DocumentsConfig, ExtractionConfig
 
 
 # Mapping of file extensions to LangChain loader classes (lazy imports)
@@ -48,8 +50,15 @@ def _load_from_url(url: str) -> list[Document]:
     return docs
 
 
-def _load_from_file(file_path: Path) -> list[Document]:
-    """Load documents from a single file based on its extension."""
+def _load_from_file(
+    file_path: Path,
+    extraction_config: ExtractionConfig | None = None,
+) -> list[Document]:
+    """Load documents from a single file based on its extension.
+
+    For PDFs and DOCX files, also extracts tables and images
+    if extraction_config is provided and enabled.
+    """
     ext = file_path.suffix.lower()
 
     if ext not in _EXTENSION_LOADERS:
@@ -63,6 +72,8 @@ def _load_from_file(file_path: Path) -> list[Document]:
     module = importlib.import_module(module_name)
     LoaderClass = getattr(module, class_name)
 
+    docs: list[Document] = []
+
     try:
         # TextLoader needs encoding param for reliability
         if class_name == "TextLoader":
@@ -72,14 +83,46 @@ def _load_from_file(file_path: Path) -> list[Document]:
 
         docs = loader.load()
         print(f"  [FILE] Loaded {len(docs)} document(s) from: {file_path.name}")
-        return docs
 
     except Exception as e:
         print(f"  [ERROR] Error loading {file_path}: {e}")
         return []
 
+    # --- Extract tables and images from PDFs ---
+    if ext == ".pdf" and extraction_config and extraction_config.enabled:
+        if extraction_config.table_extraction:
+            from src.document_loaders.table_extractor import extract_tables_from_pdf
 
-def _load_from_directory(dir_path: Path) -> list[Document]:
+            table_docs = extract_tables_from_pdf(file_path, extraction_config)
+            if table_docs:
+                print(f"  [TABLE] Extracted {len(table_docs)} table(s) from: {file_path.name}")
+                docs.extend(table_docs)
+
+        if extraction_config.ocr_enabled:
+            from src.document_loaders.image_extractor import extract_images_from_pdf
+
+            image_docs = extract_images_from_pdf(file_path, extraction_config)
+            if image_docs:
+                print(f"  [OCR]   Extracted {len(image_docs)} image/text(s) from: {file_path.name}")
+                docs.extend(image_docs)
+
+    # --- Extract tables from DOCX ---
+    if ext == ".docx" and extraction_config and extraction_config.enabled:
+        if extraction_config.table_extraction:
+            from src.document_loaders.table_extractor import extract_tables_from_docx
+
+            table_docs = extract_tables_from_docx(file_path, extraction_config)
+            if table_docs:
+                print(f"  [TABLE] Extracted {len(table_docs)} table(s) from: {file_path.name}")
+                docs.extend(table_docs)
+
+    return docs
+
+
+def _load_from_directory(
+    dir_path: Path,
+    extraction_config: ExtractionConfig | None = None,
+) -> list[Document]:
     """Recursively load all supported files from a directory."""
     all_docs: list[Document] = []
 
@@ -91,7 +134,7 @@ def _load_from_directory(dir_path: Path) -> list[Document]:
         for file_name in sorted(files):
             file_path = Path(root) / file_name
             if file_path.suffix.lower() in SUPPORTED_EXTENSIONS:
-                all_docs.extend(_load_from_file(file_path))
+                all_docs.extend(_load_from_file(file_path, extraction_config))
 
     if not all_docs:
         print(f"  [WARN]  No supported files found in: {dir_path}")
@@ -99,13 +142,19 @@ def _load_from_directory(dir_path: Path) -> list[Document]:
     return all_docs
 
 
-def load_documents(config: DocumentsConfig) -> list[Document]:
+def load_documents(
+    config: DocumentsConfig,
+    extraction_config: ExtractionConfig | None = None,
+) -> list[Document]:
     """Load documents from all configured sources.
 
     Supports:
     - File paths (pdf, txt, md, docx, csv, html)
     - Web URLs
     - Directories (recursive)
+
+    For PDFs and DOCX files, also extracts tables and images
+    if extraction_config is provided and enabled.
     """
     all_docs: list[Document] = []
 
@@ -119,9 +168,9 @@ def load_documents(config: DocumentsConfig) -> list[Document]:
         else:
             path = Path(source)
             if path.is_dir():
-                all_docs.extend(_load_from_directory(path))
+                all_docs.extend(_load_from_directory(path, extraction_config))
             elif path.is_file():
-                all_docs.extend(_load_from_file(path))
+                all_docs.extend(_load_from_file(path, extraction_config))
             else:
                 print(f"  [WARN]  Source not found: {source}")
 

@@ -79,6 +79,15 @@ class RerankingConfig(BaseModel):
     top_k: int = 3
 
 
+class ExtractionConfig(BaseModel):
+    enabled: bool = True
+    ocr_enabled: bool = True
+    table_extraction: bool = True
+    ocr_language: str = "eng"
+    min_table_rows: int = 2
+    detect_scanned_pages: bool = True
+
+
 class ChatConfig(BaseModel):
     system_prompt: str = (
         "You are a helpful AI assistant that answers questions based on the "
@@ -111,6 +120,7 @@ class RAGConfig(BaseModel):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
     reranking: RerankingConfig = Field(default_factory=RerankingConfig)
+    extraction: ExtractionConfig = Field(default_factory=ExtractionConfig)
     chat: ChatConfig = Field(default_factory=ChatConfig)
     ui: UIConfig = Field(default_factory=UIConfig)
 

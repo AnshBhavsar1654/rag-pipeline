@@ -45,5 +45,11 @@ sentence-transformers>=3.0.0
 # langchain-cohere>=0.3.0
 # cohere>=5.0.0
 
+# For image/table extraction:
+pytesseract>=0.3.10
+Pillow>=10.0.0
+pdfplumber>=0.10.0
+pdf2image>=1.16.0
+
 # For Ollama (local LLMs):
 # (no extra pip install needed, just run Ollama server)
