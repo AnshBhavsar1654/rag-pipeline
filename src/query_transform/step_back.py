@@ -14,7 +14,9 @@ from langchain_core.prompts import (
     ChatPromptTemplate,
     FewShotChatMessagePromptTemplate,
 )
-from langchain_core.vectorstores import VectorStoreRetriever
+
+from src.retrieval.base_retriever import BaseRAGRetriever
+from src.retrieval.utils import SearchRetriever, reciprocal_rank_fusion
 
 
 # Few-shot examples for step-back prompting
@@ -34,16 +36,18 @@ _STEP_BACK_EXAMPLES = [
 ]
 
 
-class StepBackPrompter:
-    """Generate a step-back question for broader retrieval context."""
+class StepBackRetriever(BaseRAGRetriever):
+    """Retrieve for both the question and a more generic step-back question."""
 
     def __init__(
         self,
-        retriever: VectorStoreRetriever,
+        retriever: SearchRetriever,
         llm: BaseChatModel,
+        rrf_k: int = 60,
     ):
         self._retriever = retriever
         self._llm = llm
+        self._rrf_k = rrf_k
 
         # Build few-shot prompt for step-back question generation
         example_prompt = ChatPromptTemplate.from_messages([
@@ -67,24 +71,21 @@ class StepBackPrompter:
 
         self._step_back_chain = prompt | self._llm | StrOutputParser()
 
-    def retrieve_with_step_back(self, question: str) -> list[Document]:
-        """Retrieve documents using both the original and step-back question.
+    @property
+    def strategy_name(self) -> str:
+        return "Step-Back"
 
-        Returns a deduplicated list of documents from both retrieval passes.
+    def retrieve(self, question: str) -> list[Document]:
+        """Retrieve documents using both the original and step-back question,
+        fusing the two rankings so specific matches stay ahead of background.
         """
-        # Generate step-back question
-        step_back_q = self._step_back_chain.invoke({"question": question})
-
-        # Retrieve for both questions
         normal_docs = self._retriever.invoke(question)
+
+        try:
+            step_back_q = self._step_back_chain.invoke({"question": question}).strip()
+        except Exception as e:
+            print(f"[WARN]  Step-back generation failed ({e}); using the original question only.")
+            return normal_docs
+
         step_back_docs = self._retriever.invoke(step_back_q)
-
-        # Deduplicate
-        seen: set[str] = set()
-        combined: list[Document] = []
-        for doc in normal_docs + step_back_docs:
-            if doc.page_content not in seen:
-                seen.add(doc.page_content)
-                combined.append(doc)
-
-        return combined
+        return reciprocal_rank_fusion([normal_docs, step_back_docs], k=self._rrf_k)

@@ -11,9 +11,14 @@ from langchain_core.documents import Document
 from langchain_core.language_models import BaseChatModel
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.vectorstores import VectorStoreRetriever
 
 from src.retrieval.base_retriever import BaseRAGRetriever
+from src.retrieval.utils import (
+    SearchRetriever,
+    parse_query_list,
+    reciprocal_rank_fusion,
+    search_all,
+)
 
 
 _RAG_FUSION_TEMPLATE = """\
@@ -21,35 +26,9 @@ You are a helpful assistant that generates multiple search queries based on \
 a single input query. Generate {num_queries} different search queries related to \
 the following question. Provide diverse perspectives to maximize retrieval coverage.
 
-Provide the queries separated by newlines. Do NOT number them.
+Output ONLY the queries, one per line, with no numbering or preamble.
 
 Original question: {question}"""
-
-
-def reciprocal_rank_fusion(
-    results: list[list[Document]],
-    k: int = 60,
-) -> list[Document]:
-    """Apply Reciprocal Rank Fusion across multiple ranked document lists.
-
-    RRF score for each document = Σ 1 / (rank + k)
-    where the sum is over all lists that contain the document.
-    """
-    fused_scores: dict[str, float] = {}
-    doc_map: dict[str, Document] = {}
-
-    for doc_list in results:
-        for rank, doc in enumerate(doc_list):
-            key = doc.page_content
-            if key not in doc_map:
-                doc_map[key] = doc
-                fused_scores[key] = 0.0
-            fused_scores[key] += 1.0 / (rank + k)
-
-    # Sort by fused score descending
-    sorted_keys = sorted(fused_scores.keys(), key=lambda x: fused_scores[x], reverse=True)
-
-    return [doc_map[key] for key in sorted_keys]
 
 
 class RAGFusionRetriever(BaseRAGRetriever):
@@ -57,7 +36,7 @@ class RAGFusionRetriever(BaseRAGRetriever):
 
     def __init__(
         self,
-        retriever: VectorStoreRetriever,
+        retriever: SearchRetriever,
         llm: BaseChatModel,
         num_queries: int = 4,
         rrf_k: int = 60,
@@ -71,7 +50,6 @@ class RAGFusionRetriever(BaseRAGRetriever):
             ChatPromptTemplate.from_template(_RAG_FUSION_TEMPLATE)
             | self._llm
             | StrOutputParser()
-            | (lambda text: [q.strip() for q in text.strip().split("\n") if q.strip()])
         )
 
     @property
@@ -79,22 +57,15 @@ class RAGFusionRetriever(BaseRAGRetriever):
         return "RAG-Fusion (RRF)"
 
     def retrieve(self, question: str) -> list[Document]:
-        # Generate query variants
-        queries = self._query_chain.invoke({
-            "question": question,
-            "num_queries": self._num_queries,
-        })
+        try:
+            text = self._query_chain.invoke({
+                "question": question,
+                "num_queries": self._num_queries,
+            })
+            queries = parse_query_list(text, limit=self._num_queries)
+        except Exception as e:
+            print(f"[WARN]  Query generation failed ({e}); using the original question only.")
+            queries = []
 
-        # Always include the original question
-        all_queries = [question] + queries[:self._num_queries]
-
-        # Retrieve for each query
-        all_results: list[list[Document]] = []
-        for q in all_queries:
-            docs = self._retriever.invoke(q)
-            all_results.append(docs)
-
-        # Apply Reciprocal Rank Fusion
-        fused = reciprocal_rank_fusion(all_results, k=self._rrf_k)
-
-        return fused
+        results = search_all(self._retriever, question, queries)
+        return reciprocal_rank_fusion(results, k=self._rrf_k)

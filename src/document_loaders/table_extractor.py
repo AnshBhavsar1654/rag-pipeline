@@ -136,7 +136,6 @@ def extract_tables_from_docx(
                 metadata={
                     "source": str(docx_path),
                     "type": "table",
-                    "page": 0,
                     "table_index": table_idx,
                 },
             )

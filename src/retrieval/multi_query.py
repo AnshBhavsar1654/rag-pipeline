@@ -7,13 +7,15 @@ documents for each variant, and unions the results for broader recall.
 
 from __future__ import annotations
 
+from itertools import zip_longest
+
 from langchain_core.documents import Document
 from langchain_core.language_models import BaseChatModel
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.vectorstores import VectorStoreRetriever
 
 from src.retrieval.base_retriever import BaseRAGRetriever
+from src.retrieval.utils import SearchRetriever, doc_key, parse_query_list, search_all
 
 
 _MULTI_QUERY_TEMPLATE = """\
@@ -23,7 +25,7 @@ from a vector database. By generating multiple perspectives on the user question
 your goal is to help the user overcome some of the limitations of distance-based \
 similarity search.
 
-Provide these alternative questions separated by newlines. Do NOT number them.
+Output ONLY the alternative questions, one per line, with no numbering or preamble.
 
 Original question: {question}"""
 
@@ -33,7 +35,7 @@ class MultiQueryRetriever(BaseRAGRetriever):
 
     def __init__(
         self,
-        retriever: VectorStoreRetriever,
+        retriever: SearchRetriever,
         llm: BaseChatModel,
         num_queries: int = 4,
     ):
@@ -45,7 +47,6 @@ class MultiQueryRetriever(BaseRAGRetriever):
             ChatPromptTemplate.from_template(_MULTI_QUERY_TEMPLATE)
             | self._llm
             | StrOutputParser()
-            | (lambda text: [q.strip() for q in text.strip().split("\n") if q.strip()])
         )
 
     @property
@@ -53,24 +54,28 @@ class MultiQueryRetriever(BaseRAGRetriever):
         return "Multi-Query"
 
     def retrieve(self, question: str) -> list[Document]:
-        # Generate query variants
-        queries = self._query_chain.invoke({
-            "question": question,
-            "num_queries": self._num_queries,
-        })
+        queries = self._generate_queries(question)
+        results = search_all(self._retriever, question, queries)
 
-        # Always include the original question
-        all_queries = [question] + queries[:self._num_queries]
-
-        # Retrieve for each query and deduplicate
-        seen_contents: set[str] = set()
+        # Interleave the result lists (best hit of each query first) so that
+        # truncating to top-k keeps every query's strongest match.
+        seen: set[str] = set()
         unique_docs: list[Document] = []
-
-        for q in all_queries:
-            docs = self._retriever.invoke(q)
-            for doc in docs:
-                if doc.page_content not in seen_contents:
-                    seen_contents.add(doc.page_content)
+        for tier in zip_longest(*results):
+            for doc in tier:
+                if doc is not None and doc_key(doc) not in seen:
+                    seen.add(doc_key(doc))
                     unique_docs.append(doc)
 
         return unique_docs
+
+    def _generate_queries(self, question: str) -> list[str]:
+        try:
+            text = self._query_chain.invoke({
+                "question": question,
+                "num_queries": self._num_queries,
+            })
+        except Exception as e:
+            print(f"[WARN]  Query generation failed ({e}); using the original question only.")
+            return []
+        return parse_query_list(text, limit=self._num_queries)

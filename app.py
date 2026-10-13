@@ -14,54 +14,74 @@ import argparse
 import gradio as gr
 
 from src.pipeline.rag_pipeline import RAGPipeline
-from src.chat.chatbot import RAGChatbot
+from src.chat.chatbot import format_history, messages_from_gradio
+from src.vectorstore.store import VectorStoreNotReadyError
 
 
 def create_app(config_path: str | None = None, share: bool = False):
     """Create and launch the Gradio chatbot application."""
 
-    # Initialize pipeline (auto-ingest if vectorstore doesn't exist)
+    # Initialize pipeline (auto-ingest if there is no usable vectorstore)
     pipeline = RAGPipeline.from_config(config_path)
     try:
         pipeline.load()
-    except FileNotFoundError:
-        print("[INFO] No vectorstore found. Ingesting documents from config...")
+    except VectorStoreNotReadyError as e:
+        print(f"[INFO] {e}")
+        print("[INFO] Ingesting documents from config...")
         try:
             pipeline.ingest()
-            pipeline.load()
         except Exception as e:
             print(f"[ERROR] Ingestion failed: {e}")
+        if not pipeline.is_ready:
             print("[INFO] Starting with empty vector store. Upload documents via the UI.")
 
-    chatbot = RAGChatbot(pipeline)
     ui_config = pipeline.config.ui
+    memory_window = pipeline.config.chat.memory_window
+
+    def header() -> str:
+        strategy = pipeline.strategy_name if pipeline.is_ready else "N/A (ingest documents to start)"
+        return (
+            f"# {ui_config.title}\n\n"
+            f"{ui_config.description}\n\n"
+            f"**Retrieval Strategy:** {strategy} "
+            f"| **LLM:** {pipeline.config.llm.model}"
+        )
 
     # ---- Handlers ----
 
     def upload_files(files):
         """Handle uploaded files: ingest into vector store."""
         if not files:
-            return "No files selected."
+            return "No files selected.", header()
+        try:
+            result = pipeline.ingest_files(list(files))
+        except Exception as e:
+            result = f"Ingestion failed: {e}"
+        return result, header()
 
-        file_paths = [f for f in files]
-        result = pipeline.ingest_files(file_paths)
-        return result
-
-    def respond(message: str, history: list[dict[str, str]]):
-        """Process a user message and yield the response."""
+    def respond(message: str, history: list[dict]):
+        """Stream the answer to *message*, using this session's chat history."""
         if not message.strip():
-            return ""
+            yield ""
+            return
 
-        if chatbot.pipeline._retriever is None:
-            return "No documents loaded yet. Upload and ingest documents first, then try again."
+        if not pipeline.is_ready:
+            yield "No documents loaded yet. Upload and ingest documents first, then try again."
+            return
 
-        response = chatbot.chat(message)
-        return response
+        # History comes from the browser session, so each user has their own
+        # conversation and the UI's clear button really resets it.
+        chat_history = format_history(messages_from_gradio(history), memory_window)
 
-    def clear_chat():
-        """Clear chat history."""
-        chatbot.clear_history()
-        return [], ""
+        answer = ""
+        try:
+            stream, documents = pipeline.stream_query(message, chat_history)
+            for piece in stream:
+                answer += piece
+                yield answer
+            yield pipeline.format_response(answer, documents)
+        except Exception as e:
+            yield f"{answer}\n\n**Error:** {e}".strip()
 
     # ---- Build the UI ----
 
@@ -74,17 +94,7 @@ def create_app(config_path: str | None = None, share: bool = False):
 
     with gr.Blocks(title=ui_config.title) as app:
 
-        strategy_name = (
-            chatbot.pipeline._retriever.strategy_name
-            if chatbot.pipeline._retriever
-            else "N/A (ingest documents to start)"
-        )
-        gr.Markdown(
-            f"# {ui_config.title}\n\n"
-            f"{ui_config.description}\n\n"
-            f"**Retrieval Strategy:** {strategy_name} "
-            f"| **LLM:** {pipeline.config.llm.model}"
-        )
+        header_md = gr.Markdown(header())
 
         with gr.Row():
             with gr.Column(scale=1):
@@ -100,12 +110,12 @@ def create_app(config_path: str | None = None, share: bool = False):
         upload_btn.click(
             fn=upload_files,
             inputs=[file_upload],
-            outputs=[upload_status],
+            outputs=[upload_status, header_md],
         )
 
         gr.Markdown("---")
 
-        chat_interface = gr.ChatInterface(
+        gr.ChatInterface(
             fn=respond,
             examples=[
                 "What is this document about?",

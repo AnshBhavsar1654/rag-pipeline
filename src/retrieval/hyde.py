@@ -11,9 +11,9 @@ from langchain_core.documents import Document
 from langchain_core.language_models import BaseChatModel
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.vectorstores import VectorStoreRetriever
 
 from src.retrieval.base_retriever import BaseRAGRetriever
+from src.retrieval.utils import SearchRetriever, reciprocal_rank_fusion
 
 
 _DEFAULT_HYDE_TEMPLATE = """\
@@ -27,12 +27,14 @@ class HyDERetriever(BaseRAGRetriever):
 
     def __init__(
         self,
-        retriever: VectorStoreRetriever,
+        retriever: SearchRetriever,
         llm: BaseChatModel,
         hypothesis_prompt: str | None = None,
+        rrf_k: int = 60,
     ):
         self._retriever = retriever
         self._llm = llm
+        self._rrf_k = rrf_k
 
         template = hypothesis_prompt or _DEFAULT_HYDE_TEMPLATE
         self._hypothesis_chain = (
@@ -46,10 +48,16 @@ class HyDERetriever(BaseRAGRetriever):
         return "HyDE"
 
     def retrieve(self, question: str) -> list[Document]:
-        # Generate hypothetical document
-        hypothetical_doc = self._hypothesis_chain.invoke({"question": question})
+        try:
+            hypothetical_doc = self._hypothesis_chain.invoke({"question": question})
+        except Exception as e:
+            print(f"[WARN]  HyDE generation failed ({e}); using the original question only.")
+            return self._retriever.invoke(question)
 
-        # Use the hypothetical document as the retrieval query
-        docs = self._retriever.invoke(hypothetical_doc)
-
-        return docs
+        # The hypothetical passage finds documents that *look like* an answer;
+        # the question itself guards against a hallucinated passage drifting
+        # off-topic. Fuse both rankings.
+        return reciprocal_rank_fusion(
+            [self._retriever.invoke(hypothetical_doc), self._retriever.invoke(question)],
+            k=self._rrf_k,
+        )

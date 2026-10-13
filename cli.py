@@ -68,10 +68,12 @@ def main():
         # Get response
         print("\n[THINK] Thinking...\n")
         try:
-            response = chatbot.chat(user_input)
-            print(f"Assistant: {response}\n")
+            print("Assistant: ", end="", flush=True)
+            for piece in chatbot.stream_chat(user_input):
+                print(piece, end="", flush=True)
+            print("\n")
         except Exception as e:
-            print(f"[ERROR] Error: {e}\n")
+            print(f"\n[ERROR] Error: {e}\n")
 
 
 if __name__ == "__main__":

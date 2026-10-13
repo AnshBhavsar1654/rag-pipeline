@@ -23,15 +23,26 @@ class DocumentsConfig(BaseModel):
 
 
 class ChunkingConfig(BaseModel):
-    chunk_size: int = 1000
-    chunk_overlap: int = 200
+    # Measured in tokens when use_tiktoken is true, characters otherwise.
+    # Keep chunks within the embedding model's max sequence length, or the
+    # tail of every chunk is silently truncated before it is embedded.
+    chunk_size: int = 400
+    chunk_overlap: int = 60
     use_tiktoken: bool = True
     tiktoken_encoding: str = "cl100k_base"
 
 
 class EmbeddingConfig(BaseModel):
-    provider: Literal["openai", "google", "huggingface"] = "google"
-    model: str = "models/gemini-embedding-001"
+    provider: Literal["openai", "google", "huggingface"] = "huggingface"
+    model: str = "BAAI/bge-small-en-v1.5"
+    # Prefix prepended to search queries (not documents). Some models, like
+    # the BGE family, retrieve noticeably better with an instruction prefix.
+    query_instruction: str = ""
+
+    @property
+    def signature(self) -> str:
+        """Identifies the vector space; stored alongside the index."""
+        return f"{self.provider}:{self.model}"
 
 
 class VectorStoreConfig(BaseModel):
@@ -45,7 +56,10 @@ class LLMConfig(BaseModel):
     model: str = "gemini-3.6-flash"
     temperature: float = 0.1
     max_tokens: int = 2048
+    max_retries: int = 3
     base_url: Optional[str] = None
+    # Optional second model used when the primary errors (outage, rate limit).
+    fallback: Optional[LLMConfig] = None
 
 
 class MultiQueryConfig(BaseModel):
@@ -64,9 +78,18 @@ class HyDEConfig(BaseModel):
     )
 
 
+class HybridConfig(BaseModel):
+    enabled: bool = True
+    fetch_k: int = 20       # Candidates pulled from each of dense and BM25
+    rrf_k: int = 60
+
+
 class RetrievalConfig(BaseModel):
-    strategy: Literal["simple", "multi_query", "rag_fusion", "hyde"] = "rag_fusion"
+    strategy: Literal[
+        "simple", "multi_query", "rag_fusion", "hyde", "step_back", "decomposition"
+    ] = "rag_fusion"
     top_k: int = 5
+    hybrid: HybridConfig = Field(default_factory=HybridConfig)
     multi_query: MultiQueryConfig = Field(default_factory=MultiQueryConfig)
     rag_fusion: RAGFusionConfig = Field(default_factory=RAGFusionConfig)
     hyde: HyDEConfig = Field(default_factory=HyDEConfig)
@@ -76,7 +99,8 @@ class RerankingConfig(BaseModel):
     enabled: bool = False
     provider: Literal["cross_encoder", "cohere"] = "cross_encoder"
     model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
-    top_k: int = 3
+    candidates: int = 20    # How many retrieved chunks the reranker scores
+    top_k: int = 5          # How many survive to the LLM
 
 
 class ExtractionConfig(BaseModel):
@@ -96,6 +120,9 @@ class ChatConfig(BaseModel):
     )
     memory_window: int = 10
     show_sources: bool = True
+    # Rewrite follow-ups ("what about its cost?") into standalone questions
+    # before retrieval, so the search sees the full intent.
+    rewrite_followups: bool = True
 
 
 class UIConfig(BaseModel):

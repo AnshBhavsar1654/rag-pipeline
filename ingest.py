@@ -22,6 +22,12 @@ def main():
         default=None,
         help="Path to config YAML file (default: config/config.yaml)",
     )
+    parser.add_argument(
+        "--rebuild",
+        action="store_true",
+        help="Wipe the index and rebuild it from the configured sources only "
+             "(drops files uploaded through the web UI)",
+    )
     args = parser.parse_args()
 
     # Import here to avoid slow startup for --help
@@ -29,13 +35,16 @@ def main():
 
     try:
         pipeline = RAGPipeline.from_config(args.config)
-        pipeline.ingest()
+        pipeline.ingest(rebuild=args.rebuild)
     except FileNotFoundError as e:
         print(f"\n[ERROR] {e}")
         sys.exit(1)
     except Exception as e:
         print(f"\n[ERROR] Error during ingestion: {e}")
         raise
+
+    if not pipeline.is_ready:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

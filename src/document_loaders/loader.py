@@ -46,6 +46,8 @@ def _load_from_url(url: str) -> list[Document]:
 
     loader = WebBaseLoader(web_paths=[url])
     docs = loader.load()
+    for doc in docs:
+        doc.metadata.setdefault("type", "text")
     print(f"  [FILE] Loaded {len(docs)} document(s) from URL: {url}")
     return docs
 
@@ -75,13 +77,24 @@ def _load_from_file(
     docs: list[Document] = []
 
     try:
-        # TextLoader needs encoding param for reliability
+        # Pin text encodings: on Windows the default is cp1252, which fails
+        # on (or silently garbles) most non-ASCII UTF-8 content.
         if class_name == "TextLoader":
+            loader = LoaderClass(str(file_path), encoding="utf-8", autodetect_encoding=True)
+        elif class_name == "CSVLoader":
             loader = LoaderClass(str(file_path), encoding="utf-8")
+        elif class_name == "BSHTMLLoader":
+            loader = LoaderClass(str(file_path), open_encoding="utf-8")
         else:
             loader = LoaderClass(str(file_path))
 
         docs = loader.load()
+        for doc in docs:
+            doc.metadata.setdefault("type", "text")
+            # PyPDFLoader numbers pages from 0; the table and OCR extractors
+            # (and humans) number from 1. Normalise so citations agree.
+            if ext == ".pdf" and isinstance(doc.metadata.get("page"), int):
+                doc.metadata["page"] += 1
         print(f"  [FILE] Loaded {len(docs)} document(s) from: {file_path.name}")
 
     except Exception as e:
@@ -164,7 +177,10 @@ def load_documents(
         source = source.strip()
 
         if _is_url(source):
-            all_docs.extend(_load_from_url(source))
+            try:
+                all_docs.extend(_load_from_url(source))
+            except Exception as e:
+                print(f"  [ERROR] Error loading URL {source}: {e}")
         else:
             path = Path(source)
             if path.is_dir():

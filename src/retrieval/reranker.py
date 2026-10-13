@@ -17,6 +17,7 @@ class Reranker:
     def __init__(self, config: RerankingConfig):
         self._config = config
         self._compressor = None
+        self._enabled = config.enabled
 
         if not config.enabled:
             return
@@ -36,21 +37,25 @@ class Reranker:
             print(f"[RANK] Reranker: CrossEncoder ({self._config.model})")
         except ImportError:
             print("[WARN]  sentence-transformers not installed. Disabling re-ranking.")
-            self._config.enabled = False
+            self._enabled = False
 
     def _init_cohere(self) -> None:
         """Initialize Cohere re-ranking."""
         try:
-            from langchain.retrievers.document_compressors import CohereRerank
-            self._compressor = CohereRerank(model=self._config.model)
+            from langchain_cohere import CohereRerank
+            self._compressor = CohereRerank(model=self._config.model, top_n=self._config.top_k)
             print(f"[RANK] Reranker: Cohere ({self._config.model})")
         except ImportError:
             print("[WARN]  langchain-cohere not installed. Disabling re-ranking.")
-            self._config.enabled = False
+            self._enabled = False
+
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
 
     def rerank(self, query: str, documents: list[Document]) -> list[Document]:
         """Re-rank documents and return top-k."""
-        if not self._config.enabled or not documents:
+        if not self._enabled or not documents:
             return documents
 
         top_k = self._config.top_k
@@ -67,7 +72,7 @@ class Reranker:
     ) -> list[Document]:
         """Re-rank using cross-encoder similarity scores."""
         pairs = [(query, doc.page_content) for doc in documents]
-        scores = self._cross_encoder.predict(pairs)
+        scores = self._cross_encoder.predict(pairs, show_progress_bar=False)
 
         # Sort by score descending
         scored_docs = sorted(

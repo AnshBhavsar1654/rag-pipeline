@@ -6,6 +6,9 @@ Configurable LLM generation with support for OpenAI, Groq, Google and Ollama pro
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from pathlib import Path
+
 from langchain_core.documents import Document
 from langchain_core.language_models import BaseChatModel
 from langchain_core.output_parsers import StrOutputParser
@@ -15,7 +18,11 @@ from src.config import LLMConfig
 
 
 def create_llm(config: LLMConfig) -> BaseChatModel:
-    """Create an LLM instance based on configuration."""
+    """Create an LLM instance based on configuration.
+
+    With ``config.fallback`` set, returns a runnable that retries a failed
+    call on the fallback model (still usable anywhere a chat model is).
+    """
 
     if config.provider == "openai":
         from langchain_openai import ChatOpenAI
@@ -23,6 +30,8 @@ def create_llm(config: LLMConfig) -> BaseChatModel:
             model=config.model,
             temperature=config.temperature,
             max_tokens=config.max_tokens,
+            max_retries=config.max_retries,
+            **({"base_url": config.base_url} if config.base_url else {}),
         )
         print(f"[LLM] LLM: OpenAI ({config.model})")
 
@@ -32,6 +41,7 @@ def create_llm(config: LLMConfig) -> BaseChatModel:
             model=config.model,
             temperature=config.temperature,
             max_tokens=config.max_tokens,
+            max_retries=config.max_retries,
         )
         print(f"[LLM] LLM: Groq ({config.model})")
 
@@ -41,11 +51,15 @@ def create_llm(config: LLMConfig) -> BaseChatModel:
             model=config.model,
             temperature=config.temperature,
             max_output_tokens=config.max_tokens,
+            max_retries=config.max_retries,
         )
         print(f"[LLM] LLM: Google ({config.model})")
 
     elif config.provider == "ollama":
-        from langchain_community.chat_models import ChatOllama
+        try:
+            from langchain_ollama import ChatOllama
+        except ImportError:
+            from langchain_community.chat_models import ChatOllama
         llm = ChatOllama(
             model=config.model,
             temperature=config.temperature,
@@ -56,40 +70,74 @@ def create_llm(config: LLMConfig) -> BaseChatModel:
     else:
         raise ValueError(f"Unsupported LLM provider: {config.provider}")
 
+    if config.fallback is not None:
+        return llm.with_fallbacks([create_llm(config.fallback)])
     return llm
+
 
 
 # ---------------------------------------------------------------------------
 # Generation chain
 # ---------------------------------------------------------------------------
 
-_RAG_TEMPLATE = """\
-You are a helpful AI assistant. Answer the question based ONLY on the \
-following context. If the context doesn't contain enough information to \
-answer the question, say so honestly.
+_GROUNDING_RULES = """\
+Answer using ONLY the numbered context passages provided by the user. Cite \
+the passages that support each claim with their numbers in square brackets, \
+e.g. [1] or [2][3], using plain ASCII square brackets. If the passages do not \
+contain the answer, say that you could not find it in the documents rather \
+than guessing. Never invent \
+sources or facts."""
 
-Context:
-{context}
+# Every piece of user- or config-supplied text enters the prompt as a
+# variable, never by string formatting, so braces in it can't break the template.
+_RAG_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", "{system_prompt}\n\n{grounding_rules}"),
+    ("human", "Context passages:\n\n{context}\n\n{history_block}Question: {question}"),
+])
 
-Question: {question}
-
-Answer:"""
+SOURCES_HEADER = "**Sources**"
 
 
-_RAG_TEMPLATE_WITH_HISTORY = """\
-You are a helpful AI assistant. Answer the question based on the provided \
-context and conversation history. If the context doesn't contain enough \
-information, say so honestly.
+def _source_label(doc: Document) -> str:
+    """Short human-readable origin of a chunk, e.g. ``report.pdf, p. 3 (table)``."""
+    meta = doc.metadata
+    source = str(meta.get("source", "Unknown"))
+    label = source if source.startswith(("http://", "https://")) else Path(source).name
+    page = meta.get("page")
+    if isinstance(page, int) and page > 0:
+        label += f", p. {page}"
+    kind = meta.get("type")
+    if kind and kind != "text":
+        label += f" ({kind.replace('_', ' ')})"
+    return label
 
-Context:
-{context}
 
-Conversation History:
-{chat_history}
+def format_context(documents: list[Document]) -> str:
+    """Number each chunk so the model can cite it and the UI can list it."""
+    if not documents:
+        return "(No relevant passages were found.)"
+    return "\n\n".join(
+        f"[{i}] Source: {_source_label(doc)}\n{doc.page_content}"
+        for i, doc in enumerate(documents, start=1)
+    )
 
-Question: {question}
 
-Answer:"""
+def _prompt_inputs(
+    question: str,
+    documents: list[Document],
+    chat_history: str,
+    system_prompt: str,
+) -> dict[str, str]:
+    history_block = (
+        f"Conversation so far:\n{chat_history}\n\n" if chat_history.strip() else ""
+    )
+    return {
+        "system_prompt": system_prompt.strip() or "You are a helpful AI assistant.",
+        "grounding_rules": _GROUNDING_RULES,
+        "context": format_context(documents),
+        "history_block": history_block,
+        "question": question,
+    }
 
 
 def generate_answer(
@@ -111,67 +159,26 @@ def generate_answer(
     Returns:
         The generated answer string.
     """
-    context = "\n\n---\n\n".join(doc.page_content for doc in documents)
-
-    if chat_history:
-        template = _RAG_TEMPLATE_WITH_HISTORY
-        invoke_args = {
-            "context": context,
-            "chat_history": chat_history,
-            "question": question,
-        }
-    else:
-        template = _RAG_TEMPLATE
-        invoke_args = {
-            "context": context,
-            "question": question,
-        }
-
-    # Override template if a custom system prompt is provided
-    if system_prompt:
-        if chat_history:
-            template = (
-                f"{system_prompt}\n\n"
-                "Context:\n{context}\n\n"
-                "Conversation History:\n{chat_history}\n\n"
-                "Question: {question}\n\nAnswer:"
-            )
-        else:
-            template = (
-                f"{system_prompt}\n\n"
-                "Context:\n{context}\n\n"
-                "Question: {question}\n\nAnswer:"
-            )
-
-    chain = (
-        ChatPromptTemplate.from_template(template)
-        | llm
-        | StrOutputParser()
-    )
-
-    return chain.invoke(invoke_args)
+    chain = _RAG_PROMPT | llm | StrOutputParser()
+    return chain.invoke(_prompt_inputs(question, documents, chat_history, system_prompt))
 
 
-def format_sources(documents: list[Document], max_sources: int = 3) -> str:
-    """Format source documents for display."""
-    if not documents:
-        return ""
+def stream_answer(
+    llm: BaseChatModel,
+    question: str,
+    documents: list[Document],
+    chat_history: str = "",
+    system_prompt: str = "",
+) -> Iterator[str]:
+    """Like :func:`generate_answer`, but yields the answer as it is generated."""
+    chain = _RAG_PROMPT | llm | StrOutputParser()
+    yield from chain.stream(_prompt_inputs(question, documents, chat_history, system_prompt))
 
-    sources: list[str] = []
-    seen: set[str] = set()
 
-    for doc in documents[:max_sources]:
-        # Build source identifier from metadata
-        source = doc.metadata.get("source", "Unknown")
-        page = doc.metadata.get("page", "")
-
-        identifier = f"{source}"
-        if page:
-            identifier += f" (page {page})"
-
-        if identifier not in seen:
-            seen.add(identifier)
-            snippet = doc.page_content[:150].replace("\n", " ").strip()
-            sources.append(f"  [SRC] {identifier}\n     \"{snippet}...\"")
-
-    return "\n".join(sources)
+def format_sources(documents: list[Document], snippet_chars: int = 150) -> str:
+    """List the context passages, numbered to match the answer's [n] citations."""
+    lines: list[str] = []
+    for i, doc in enumerate(documents, start=1):
+        snippet = " ".join(doc.page_content.split())[:snippet_chars]
+        lines.append(f"- **[{i}]** {_source_label(doc)} — \"{snippet}...\"")
+    return "\n".join(lines)
