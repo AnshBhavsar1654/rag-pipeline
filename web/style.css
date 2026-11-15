@@ -251,9 +251,9 @@ h1, h2 { margin: 0; }
   .shell { grid-template-columns: 1fr; }
   .library {
     position: fixed; inset: 0 auto 0 0; width: min(320px, 88vw); z-index: 20;
-    transform: translateX(-100%); transition: transform .2s ease; box-shadow: 0 0 40px rgba(0, 0, 0, .18);
+    transform: translateX(-100%); transition: transform .2s ease;
   }
-  .library.open { transform: none; }
+  .library.open { transform: none; box-shadow: 0 0 40px rgba(0, 0, 0, .18); }
   .icon-btn { display: inline-block; }
   .topbar, .thread, .composer { padding-left: 16px; padding-right: 16px; }
   .welcome h2 { font-size: 25px; }
