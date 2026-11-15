@@ -44,8 +44,9 @@ def test_graph_delete_sources_removes_orphans(tmp_path):
 def test_graph_extractor_batches_chunks(tmp_path):
     store = GraphStore(tmp_path / "g.json")
     chunks = [Document(page_content=f"chunk {i}", metadata={"source": "a.md"}) for i in range(3)]
-    added = GraphExtractor(FakeListChatModel(responses=[TRIPLES, "[]"]), batch_size=2).build(store, chunks)
-    assert added == 2
+    extractor = GraphExtractor(FakeListChatModel(responses=[TRIPLES]), batch_chars=1000, max_workers=1)
+    assert len(extractor._batches(chunks)) == 1     # small chunks share one call
+    assert extractor.build(store, chunks) == 2
 
 
 def test_text_to_cypher_falls_back_to_entity_facts(tmp_path):

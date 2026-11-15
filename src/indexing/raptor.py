@@ -14,6 +14,7 @@ file, and its summaries are replaced together with its chunks.
 from __future__ import annotations
 
 import math
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 from langchain_core.documents import Document
@@ -63,52 +64,65 @@ class RaptorBuilder:
         self,
         llm: BaseChatModel,
         embeddings: Embeddings,
-        cluster_size: int = 6,
+        cluster_size: int = 10,
         max_levels: int = 3,
         max_chars: int = 12000,
+        max_workers: int = 4,
     ):
         self._chain = _CLUSTER_PROMPT | llm | StrOutputParser()
         self._embeddings = embeddings
         self._cluster_size = max(2, cluster_size)
         self._max_levels = max_levels
         self._max_chars = max_chars
+        self._max_workers = max(1, max_workers)
+
+    def _summarize(self, members: list[Document]) -> str | None:
+        text = "\n\n".join(m.page_content for m in members)[: self._max_chars]
+        try:
+            return self._chain.invoke({"passages": text}).strip() or None
+        except Exception as e:  # noqa: BLE001
+            print(f"[WARN]  RAPTOR summary failed ({e}); skipping that cluster.")
+            return None
 
     def build(
         self,
         leaves: list[Document],
         vectors: list[list[float]] | None = None,
         source: str = "",
+        progress=None,
     ) -> list[Document]:
-        """Return the summary nodes of every level above *leaves* (one source's chunks)."""
+        """Return the summary nodes of every level above *leaves* (one source's chunks).
+
+        The clusters of a level are summarized concurrently (*max_workers*)."""
         if len(leaves) < 2:
             return []
         nodes = leaves
         matrix = np.array(vectors if vectors is not None
                           else self._embeddings.embed_documents([d.page_content for d in leaves]), dtype=float)
         summaries: list[Document] = []
+        # Rough total for progress: about n/size + n/size^2 + ... clusters.
+        expected = sum(max(1, math.ceil(len(leaves) / self._cluster_size ** lvl))
+                       for lvl in range(1, self._max_levels + 1))
+        done = 0
 
         for level in range(1, self._max_levels + 1):
             k = max(1, math.ceil(len(nodes) / self._cluster_size))
             labels = kmeans(matrix, k) if k > 1 else np.zeros(len(nodes), dtype=int)
+            clusters = [m for m in ([nodes[i] for i in np.flatnonzero(labels == c)] for c in range(k)) if m]
             level_nodes: list[Document] = []
-            for c in range(k):
-                members = [nodes[i] for i in np.flatnonzero(labels == c)]
-                if not members:
-                    continue
-                text = "\n\n".join(m.page_content for m in members)[: self._max_chars]
-                try:
-                    summary = self._chain.invoke({"passages": text}).strip()
-                except Exception as e:
-                    print(f"[WARN]  RAPTOR summary failed at level {level} ({e}); stopping the tree here.")
-                    return summaries + level_nodes
-                if summary:
-                    level_nodes.append(Document(
-                        page_content=summary,
-                        metadata={
-                            "source": source, "type": RAPTOR_TYPE,
-                            "raptor_level": level, "cluster_size": len(members),
-                        },
-                    ))
+            with ThreadPoolExecutor(max_workers=self._max_workers) as pool:
+                for members, summary in zip(clusters, pool.map(self._summarize, clusters)):
+                    done += 1
+                    if progress:
+                        progress(min(done, expected), expected)
+                    if summary:
+                        level_nodes.append(Document(
+                            page_content=summary,
+                            metadata={
+                                "source": source, "type": RAPTOR_TYPE,
+                                "raptor_level": level, "cluster_size": len(members),
+                            },
+                        ))
             summaries.extend(level_nodes)
             print(f"[RAPTOR] Level {level}: {len(nodes)} node(s) → {len(level_nodes)} summary(ies)")
             if len(level_nodes) <= 1:

@@ -43,13 +43,18 @@ def chunk_id(doc: Document) -> str:
     return hashlib.sha256(key.encode("utf-8")).hexdigest()[:32]
 
 
-def add_documents(vectorstore: Chroma, documents: list[Document]) -> int:
-    """Upsert chunks into the store and return how many unique chunks were written."""
+def add_documents(vectorstore: Chroma, documents: list[Document], progress=None, batch_size: int = 64) -> int:
+    """Upsert chunks into the store and return how many unique chunks were written.
+
+    Embeds in batches so *progress(done, total)* can report how far along it is."""
     unique: dict[str, Document] = {}
     for doc in documents:
         unique.setdefault(chunk_id(doc), doc)
-    if unique:
-        vectorstore.add_documents(list(unique.values()), ids=list(unique.keys()))
+    ids, docs = list(unique.keys()), list(unique.values())
+    for start in range(0, len(docs), batch_size):
+        vectorstore.add_documents(docs[start: start + batch_size], ids=ids[start: start + batch_size])
+        if progress:
+            progress(min(start + batch_size, len(docs)), len(docs))
     return len(unique)
 
 

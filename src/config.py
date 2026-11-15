@@ -38,7 +38,7 @@ class ChunkingConfig(BaseModel):
 
 class RaptorConfig(BaseModel):
     enabled: bool = True
-    cluster_size: int = 6       # Average chunks per cluster summary
+    cluster_size: int = 10      # Average chunks per cluster summary
     max_levels: int = 3
 
 
@@ -48,6 +48,8 @@ class IndexingConfig(BaseModel):
     multi_representation: Literal["none", "parent_document", "summary"] = "parent_document"
     parent_chunk_size: int = 1000
     docstore_path: str = "./data/docstore.sqlite"
+    # LLM calls run at once during background enrichment (graph + RAPTOR)
+    llm_concurrency: int = 4
     raptor: RaptorConfig = Field(default_factory=RaptorConfig)
 
 
@@ -81,7 +83,7 @@ class GraphDBConfig(BaseModel):
     """Knowledge graph built by LLM triple extraction (Text-to-Cypher target)."""
     enabled: bool = True
     path: str = "./data/graph.json"
-    extraction_batch_size: int = 3   # Parent chunks per extraction call
+    extraction_batch_chars: int = 12000   # Text per extraction call (many chunks at once)
     max_results: int = 50
 
 

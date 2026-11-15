@@ -160,8 +160,8 @@ def test_upload_into_empty_store_works_and_is_idempotent(config, embeddings, tmp
     upload.write_text(DOC_TEXT, encoding="utf-8")
 
     pipeline = make_pipeline(config, embeddings)
-    msg = pipeline.ingest_files([str(upload)])
-    assert msg.startswith("Successfully ingested 1 file(s)")
+    result = pipeline.ingest_files([str(upload)])
+    assert result.message.startswith("Indexed 1 file(s)") and result.loaded == ["upload.md"]
     assert pipeline.is_ready
 
     count = pipeline._vectorstore._collection.count()

@@ -70,6 +70,21 @@ from src.generation.generator import (
 from src.generation.self_rag import AnswerGrader
 
 
+# progress(stage, done, total) — stages: loading, tables, chunking, embedding, graph, summaries, done
+Progress = Callable[[str, int, int], None]
+
+
+@dataclass
+class IngestResult:
+    message: str
+    written: int = 0
+    loaded: list[str] = field(default_factory=list)
+    failed: list[str] = field(default_factory=list)
+    sources: list[str] = field(default_factory=list)
+    # Set when ingest_files(background=True): runs graph extraction + RAPTOR.
+    enrich: Callable[[Progress | None], None] | None = None
+
+
 @dataclass
 class Retrieval:
     search_query: str               # Standalone form of the question
@@ -190,34 +205,252 @@ class RAGPipeline:
     # Ingestion
     # -----------------------------------------------------------------
 
-    def ingest(self, rebuild: bool = False) -> None:
-        """Full ingestion pipeline: load → chunk → embed → store.
+    def ingest(self, rebuild: bool = False, progress: Progress | None = None) -> None:
+        """Index the configured sources: load → chunk → embed → store → enrich.
 
         Chunks from the configured sources replace their previous versions, so
         re-running never duplicates them, while files uploaded through the UI
-        are kept. With ``rebuild=True`` the index is wiped and rebuilt from the
-        configured sources only. The pipeline is ready to query afterwards.
+        are kept. With ``rebuild=True`` every store is wiped and rebuilt from
+        the configured sources only. The pipeline is ready to query afterwards.
         """
         print("\n" + "=" * 60)
         print("  [IN] RAG Pipeline — Document Ingestion")
         print("=" * 60)
+        started = time.perf_counter()
 
-        # 1. Load documents (with table/image extraction)
-        documents = load_documents(
-            self.config.documents,
-            extraction_config=self.config.extraction,
-        )
+        documents = load_documents(self.config.documents, extraction_config=self.config.extraction)
         if not documents:
             print("\n[ERROR] No documents found. Check your config.yaml sources.")
             return
 
-        if not self._index_documents(documents, rebuild=rebuild):
+        written, enrich = self._index_documents(documents, rebuild=rebuild, progress=progress)
+        if not written:
             print("\n[ERROR] No chunks generated. Check chunking settings.")
             return
+        print(f"[OK] Searchable after {time.perf_counter() - started:.0f}s")
+        enrich(progress)
 
         print("\n" + "=" * 60)
-        print("  [OK] Ingestion complete!")
+        print(f"  [OK] Ingestion complete in {time.perf_counter() - started:.0f}s")
         print("=" * 60 + "\n")
+
+    def ingest_files(
+        self,
+        file_paths: list[str],
+        progress: Progress | None = None,
+        background: bool = False,
+    ) -> IngestResult:
+        """Index uploaded files.
+
+        The files are searchable as soon as this returns. Graph extraction and
+        RAPTOR summaries (the slow, LLM-bound part) run here too, unless
+        *background* is true: then ``result.enrich(progress)`` is left for the
+        caller to run (the web UI does it on a worker thread).
+        """
+        if not file_paths:
+            return IngestResult("No files provided.")
+
+        documents: list[Document] = []
+        loaded, failed = [], []
+        for i, fp in enumerate(file_paths):
+            path = Path(fp)
+            if not path.is_file():
+                failed.append(path.name)
+                continue
+            if progress:
+                progress("loading", i, len(file_paths))
+            pages = (lambda done, total: progress("loading", done, total)) if progress else None
+            docs = _load_from_file(path, extraction_config=self.config.extraction, progress=pages)
+            if docs:
+                documents.extend(docs)
+                loaded.append(path.name)
+            else:
+                failed.append(path.name)
+
+        if not documents:
+            return IngestResult(
+                f"Could not read {', '.join(failed)}. The file may be empty, scanned without OCR, or unsupported.",
+                failed=failed,
+            )
+
+        written, enrich = self._index_documents(documents, progress=progress)
+        message = f"Indexed {len(loaded)} file(s) into {written} chunks: {', '.join(loaded)}"
+        if failed:
+            message += f". Could not read: {', '.join(failed)}"
+        result = IngestResult(message, written=written, loaded=loaded, failed=failed,
+                              sources=sorted({str(d.metadata.get("source", "")) for d in documents}))
+        if background:
+            result.enrich = enrich
+        else:
+            enrich(progress)
+        return result
+
+    def _index_documents(
+        self,
+        documents: list[Document],
+        rebuild: bool = False,
+        progress: Progress | None = None,
+    ) -> tuple[int, Callable[[Progress | None], None]]:
+        """Make *documents* searchable; return (units written, enrich function).
+
+        Tables go to the relational DB, parents to the docstore and retrieval
+        units to the vectorstore. The returned function runs the LLM-bound
+        enrichment (graph DB triples and RAPTOR summaries) for these sources.
+        """
+        sources = {str(d.metadata.get("source", "")) for d in documents}
+        report = progress or (lambda *a: None)
+
+        # Tables → relational DB
+        report("tables", 0, 1)
+        self._index_tables(documents, rebuild=rebuild)
+
+        # Chunk optimization + multi-representation: units → vectorstore, parents → docstore
+        report("chunking", 0, 1)
+        units, parents = self._representations(documents)
+        if not units:
+            return 0, lambda _progress=None: None
+        if rebuild:
+            self.docstore.reset()
+        self.docstore.delete_sources(sources)
+        self.docstore.put(parents)
+
+        embedding = lambda done, total: report("embedding", done, total)  # noqa: E731
+        if rebuild:
+            self._vectorstore = build_vectorstore(
+                self.config.vectorstore, self.embeddings, self.config.embedding.signature,
+                documents=[],
+            )
+        else:
+            self._open_for_writing()
+            delete_sources(self._vectorstore, sources)
+        written = add_documents(self._vectorstore, units, progress=embedding)
+        print(f"[OK] Indexed {written} chunks ({self._vectorstore._collection.count()} in the vector store)")
+        self._init_retrieval()
+
+        graph_input = list(parents.values()) or units
+
+        def enrich(enrich_progress: Progress | None = None) -> None:
+            self._enrich(sources, graph_input, rebuild, enrich_progress)
+
+        return written, enrich
+
+    def _enrich(
+        self,
+        sources: set[str],
+        graph_input: list[Document],
+        rebuild: bool = False,
+        progress: Progress | None = None,
+    ) -> None:
+        """LLM-bound enrichment: graph DB triples, then RAPTOR summary trees."""
+        started = time.perf_counter()
+        self._index_graph(graph_input, sources, rebuild=rebuild, progress=progress)
+        self._build_raptor(sources, progress=progress)
+        self._init_retrieval()
+        if progress:
+            progress("done", 1, 1)
+        print(f"[OK] Enrichment finished in {time.perf_counter() - started:.0f}s")
+
+    def remove_source(self, source: str) -> None:
+        """Delete everything indexed from *source* in every store."""
+        if self._vectorstore is not None:
+            delete_sources(self._vectorstore, {source})
+        self.docstore.delete_sources({source})
+        self.relational.delete_sources({source})
+        self.graph.delete_sources({source})
+        self.graph.save()
+        if self._vectorstore is not None:
+            self._init_retrieval()
+
+    def list_sources(self) -> list[dict]:
+        """Every indexed file with its chunk, table and summary counts."""
+        if self._vectorstore is None:
+            return []
+        metas = self._vectorstore._collection.get(include=["metadatas"])["metadatas"]
+        files: dict[str, dict] = {}
+        for meta in metas:
+            meta = meta or {}
+            source = str(meta.get("source", ""))
+            entry = files.setdefault(source, {"source": source, "name": source if source.startswith("http")
+                                              else Path(source).name, "chunks": 0, "summaries": 0, "pages": 0})
+            if meta.get("type") in (RAPTOR_TYPE, "summary"):
+                entry["summaries"] += 1
+            else:
+                entry["chunks"] += 1
+            if isinstance(meta.get("page"), int):
+                entry["pages"] = max(entry["pages"], meta["page"])
+        return sorted(files.values(), key=lambda f: f["name"].lower())
+
+    def _representations(self, documents: list[Document]) -> tuple[list[Document], dict[str, Document]]:
+        indexing = self.config.indexing
+        summarizer = SummaryWriter(self.llm) if indexing.multi_representation == "summary" else None
+        return build_representations(
+            documents,
+            indexing.multi_representation,
+            split_parents=lambda docs: split_documents(
+                docs, self.config.chunking.model_copy(
+                    update={"chunk_size": indexing.parent_chunk_size, "method": "recursive"}
+                ),
+            ),
+            split_children=self._split,
+            summarizer=summarizer,
+        )
+
+    def _build_raptor(self, sources: set[str], progress: Progress | None = None) -> None:
+        """Build a RAPTOR summary tree over each newly indexed source's chunks."""
+        cfg = self.config.indexing.raptor
+        if not cfg.enabled or self._vectorstore is None:
+            return
+        builder = RaptorBuilder(self.llm, self.embeddings, cfg.cluster_size, cfg.max_levels,
+                                max_workers=self.config.indexing.llm_concurrency)
+        collection = self._vectorstore._collection
+        for source in sorted(sources):
+            # Old summaries of this source went with delete_sources(); read its leaves back.
+            data = collection.get(where={"source": source}, include=["documents", "metadatas", "embeddings"])
+            leaves, vectors = [], []
+            for text, meta, vector in zip(data["documents"], data["metadatas"], data["embeddings"]):
+                if (meta or {}).get("type") not in (RAPTOR_TYPE, "summary"):
+                    leaves.append(Document(page_content=text, metadata=meta or {}))
+                    vectors.append(list(vector))
+            if len(leaves) < 3:
+                continue
+            print(f"[RAPTOR] Building the summary tree for {Path(source).name} ({len(leaves)} chunks)...")
+            step = (lambda done, total: progress("summaries", done, total)) if progress else None
+            summaries = builder.build(leaves, vectors, source=source, progress=step)
+            if summaries:
+                add_documents(self._vectorstore, summaries)
+
+    def _index_tables(self, documents: list[Document], rebuild: bool = False) -> None:
+        """Load every table in *documents* into the relational DB (for Text-to-SQL)."""
+        if not self.config.relational_db.enabled:
+            return
+        if rebuild:
+            self.relational.reset()
+        self.relational.delete_sources({str(d.metadata.get("source", "")) for d in documents})
+        names = self.relational.add_tables(extract_tables(documents))
+        if names:
+            print(f"[SQL] Loaded {len(names)} table(s) into the relational DB: {', '.join(names)}")
+
+    def _index_graph(
+        self,
+        chunks: list[Document],
+        sources: set[str],
+        rebuild: bool = False,
+        progress: Progress | None = None,
+    ) -> None:
+        """Extract entity-relationship triples from *chunks* into the graph DB."""
+        cfg = self.config.graph_db
+        if not cfg.enabled:
+            return
+        print(f"[GRAPH] Extracting entities and relationships from {len(chunks)} chunk(s)...")
+        extractor = GraphExtractor(self.llm, cfg.extraction_batch_chars, self.config.indexing.llm_concurrency)
+        step = (lambda done, total: progress("graph", done, total)) if progress else None
+        extracted = extractor.extract(chunks, progress=step)
+        # Swap the new facts in at once, so queries never see a half-built graph.
+        if rebuild:
+            self.graph.reset()
+        self.graph.replace_sources(sources, extracted)
+        self.graph.save()
+        print(f"[GRAPH] {self.graph.graph.number_of_edges()} relationship(s) in the graph DB")
 
     def _open_for_writing(self) -> None:
         """Open the index for adding chunks, creating or migrating it if needed."""
@@ -255,150 +488,6 @@ class RAGPipeline:
             self.config.embedding.signature,
             documents=old_chunks,
         )
-
-    def ingest_files(self, file_paths: list[str]) -> str:
-        """Ingest uploaded files into the existing vector store.
-
-        Loads, chunks, embeds, and adds the documents to the running
-        vector store so the chatbot can answer questions about them.
-        Re-uploading an unchanged file does not create duplicate chunks.
-
-        Returns a status message describing what happened.
-        """
-        if not file_paths:
-            return "No files provided."
-
-        # Load documents from each file
-        all_docs: list[Document] = []
-        loaded_names: list[str] = []
-        failed_names: list[str] = []
-        for fp in file_paths:
-            path = Path(fp)
-            if not path.is_file():
-                failed_names.append(path.name)
-                continue
-            docs = _load_from_file(path, extraction_config=self.config.extraction)
-            if docs:
-                all_docs.extend(docs)
-                loaded_names.append(path.name)
-            else:
-                failed_names.append(path.name)
-
-        if not all_docs:
-            return f"Failed to load any documents. Unsupported or unreadable: {', '.join(failed_names)}"
-
-        written = self._index_documents(all_docs)
-
-        msg = f"Successfully ingested {len(loaded_names)} file(s) ({written} chunks): {', '.join(loaded_names)}"
-        if failed_names:
-            msg += f"\nFailed: {', '.join(failed_names)}"
-        return msg
-
-    def _index_documents(self, documents: list[Document], rebuild: bool = False) -> int:
-        """Index *documents* into every store; returns the vector units written.
-
-        Chunks from the same sources replace their previous versions, so
-        re-running never duplicates them. The pipeline is ready afterwards.
-        """
-        sources = {str(d.metadata.get("source", "")) for d in documents}
-
-        # Tables → relational DB
-        self._index_tables(documents, rebuild=rebuild)
-
-        # Chunk optimization + multi-representation: units → vectorstore, parents → docstore
-        units, parents = self._representations(documents)
-        if not units:
-            return 0
-        if rebuild:
-            self.docstore.reset()
-        self.docstore.delete_sources(sources)
-        self.docstore.put(parents)
-
-        if rebuild:
-            self._vectorstore = build_vectorstore(
-                self.config.vectorstore,
-                self.embeddings,
-                self.config.embedding.signature,
-                documents=units,
-            )
-            written = len(units)
-        else:
-            self._open_for_writing()
-            delete_sources(self._vectorstore, sources)
-            written = add_documents(self._vectorstore, units)
-            total = self._vectorstore._collection.count()
-            print(f"[OK] Indexed {written} chunks ({total} in the vector store)")
-
-        # Entities and relationships → graph DB (parents: fewer, fuller passages)
-        self._index_graph(list(parents.values()) or units, sources, rebuild=rebuild)
-
-        # Hierarchical indexing: a RAPTOR summary tree per indexed source
-        self._build_raptor(sources)
-
-        self._init_retrieval()
-        return written
-
-    def _representations(self, documents: list[Document]) -> tuple[list[Document], dict[str, Document]]:
-        indexing = self.config.indexing
-        summarizer = SummaryWriter(self.llm) if indexing.multi_representation == "summary" else None
-        return build_representations(
-            documents,
-            indexing.multi_representation,
-            split_parents=lambda docs: split_documents(
-                docs, self.config.chunking.model_copy(
-                    update={"chunk_size": indexing.parent_chunk_size, "method": "recursive"}
-                ),
-            ),
-            split_children=self._split,
-            summarizer=summarizer,
-        )
-
-    def _build_raptor(self, sources: set[str]) -> None:
-        """Build a RAPTOR summary tree over each newly indexed source's chunks."""
-        cfg = self.config.indexing.raptor
-        if not cfg.enabled or self._vectorstore is None:
-            return
-        builder = RaptorBuilder(self.llm, self.embeddings, cfg.cluster_size, cfg.max_levels)
-        collection = self._vectorstore._collection
-        for source in sorted(sources):
-            # Old summaries of this source went with delete_sources(); read its leaves back.
-            data = collection.get(where={"source": source}, include=["documents", "metadatas", "embeddings"])
-            leaves, vectors = [], []
-            for text, meta, vector in zip(data["documents"], data["metadatas"], data["embeddings"]):
-                if (meta or {}).get("type") not in (RAPTOR_TYPE, "summary"):
-                    leaves.append(Document(page_content=text, metadata=meta or {}))
-                    vectors.append(list(vector))
-            if len(leaves) < 3:
-                continue
-            print(f"[RAPTOR] Building the summary tree for {Path(source).name} ({len(leaves)} chunks)...")
-            summaries = builder.build(leaves, vectors, source=source)
-            if summaries:
-                add_documents(self._vectorstore, summaries)
-
-    def _index_tables(self, documents: list[Document], rebuild: bool = False) -> None:
-        """Load every table in *documents* into the relational DB (for Text-to-SQL)."""
-        if not self.config.relational_db.enabled:
-            return
-        if rebuild:
-            self.relational.reset()
-        self.relational.delete_sources({str(d.metadata.get("source", "")) for d in documents})
-        names = self.relational.add_tables(extract_tables(documents))
-        if names:
-            print(f"[SQL] Loaded {len(names)} table(s) into the relational DB: {', '.join(names)}")
-
-    def _index_graph(self, chunks: list[Document], sources: set[str], rebuild: bool = False) -> None:
-        """Extract entity-relationship triples from *chunks* into the graph DB."""
-        if not self.config.graph_db.enabled:
-            return
-        if rebuild:
-            self.graph.reset()
-        self.graph.delete_sources(sources)
-        print(f"[GRAPH] Extracting entities and relationships from {len(chunks)} chunk(s)...")
-        extractor = GraphExtractor(self.llm, self.config.graph_db.extraction_batch_size)
-        added = extractor.build(self.graph, chunks)
-        self.graph.save()
-        print(f"[GRAPH] Added {added} relationship(s) "
-              f"({self.graph.graph.number_of_edges()} in the graph DB)")
 
     def _split(self, documents: list[Document]) -> list[Document]:
         chunking = self.config.chunking

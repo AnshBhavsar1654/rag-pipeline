@@ -15,6 +15,9 @@ from __future__ import annotations
 
 import json
 import re
+import threading
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import networkx as nx
@@ -41,6 +44,8 @@ class GraphStore:
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self.graph = self._load()
+        # Background indexing writes while queries read; guard the graph.
+        self.lock = threading.RLock()
 
     def _load(self) -> nx.MultiDiGraph:
         graph = nx.MultiDiGraph()
@@ -98,6 +103,12 @@ class GraphStore:
                 added += 1
         return added
 
+    def replace_sources(self, sources: set[str], extracted: list[tuple[list[dict], str]]) -> int:
+        """Swap in freshly extracted triples for *sources* in one step."""
+        with self.lock:
+            self.delete_sources(sources)
+            return sum(self.add_triples(triples, source) for triples, source in extracted)
+
     def delete_sources(self, sources: set[str]) -> None:
         stale = [
             (h, t, k) for h, t, k, a in self.graph.edges(keys=True, data=True)
@@ -140,7 +151,8 @@ class GraphStore:
         """Run a Cypher query; returns one dict per result row."""
         from grandcypher import GrandCypher
 
-        result = GrandCypher(self.graph).run(query)
+        with self.lock:
+            result = GrandCypher(self.graph).run(query)
         columns = list(result.keys())
         length = max((len(v) for v in result.values()), default=0)
         rows = []
@@ -207,30 +219,60 @@ def parse_triples(text: str) -> list[dict]:
 
 
 class GraphExtractor:
-    """Batch chunks through an LLM to pull out entity-relationship triples."""
+    """Send chunks through an LLM in large batches to pull out triples.
 
-    def __init__(self, llm: BaseChatModel, batch_size: int = 3):
+    Batches are filled up to *batch_chars* characters of text (one call reads
+    many chunks), and up to *max_workers* calls run at once."""
+
+    def __init__(self, llm: BaseChatModel, batch_chars: int = 12000, max_workers: int = 4):
         self._chain = _EXTRACT_PROMPT | llm | StrOutputParser()
-        self._batch_size = max(1, batch_size)
+        self._batch_chars = max(1000, batch_chars)
+        self._max_workers = max(1, max_workers)
 
-    def build(self, store: GraphStore, chunks: list[Document]) -> int:
+    def _batches(self, chunks: list[Document]) -> list[tuple[str, list[Document]]]:
         by_source: dict[str, list[Document]] = {}
         for chunk in chunks:
             by_source.setdefault(str(chunk.metadata.get("source", "")), []).append(chunk)
-
-        added = 0
-        batches = sum(-(-len(c) // self._batch_size) for c in by_source.values())
-        done = 0
+        batches = []
         for source, docs in by_source.items():
-            for i in range(0, len(docs), self._batch_size):
-                batch = docs[i: i + self._batch_size]
-                passages = "\n\n".join(f"[{j + 1}] {d.page_content}" for j, d in enumerate(batch))
-                done += 1
-                try:
-                    triples = parse_triples(self._chain.invoke({"passages": passages}))
-                except Exception as e:
-                    print(f"[WARN]  Graph extraction failed for a batch of {Path(source).name}: {e}")
-                    continue
-                added += store.add_triples(triples, source)
-                print(f"[GRAPH] Batch {done}/{batches}: {len(triples)} triple(s)")
-        return added
+            current, size = [], 0
+            for doc in docs:
+                if current and size + len(doc.page_content) > self._batch_chars:
+                    batches.append((source, current))
+                    current, size = [], 0
+                current.append(doc)
+                size += len(doc.page_content)
+            if current:
+                batches.append((source, current))
+        return batches
+
+    def _run(self, source: str, batch: list[Document]) -> tuple[list[dict], str]:
+        passages = "\n\n".join(f"[{j + 1}] {d.page_content}" for j, d in enumerate(batch))
+        try:
+            return parse_triples(self._chain.invoke({"passages": passages})), source
+        except Exception as e:  # noqa: BLE001
+            print(f"[WARN]  Graph extraction failed for a batch of {Path(source).name}: {e}")
+            return [], source
+
+    def extract(
+        self,
+        chunks: list[Document],
+        progress: Callable[[int, int], None] | None = None,
+    ) -> list[tuple[list[dict], str]]:
+        """Return (triples, source) per batch; the store is not touched."""
+        batches = self._batches(chunks)
+        results = []
+        with ThreadPoolExecutor(max_workers=self._max_workers) as pool:
+            futures = [pool.submit(self._run, source, batch) for source, batch in batches]
+            for done, future in enumerate(as_completed(futures), start=1):
+                results.append(future.result())
+                if progress:
+                    progress(done, len(batches))
+        print(f"[GRAPH] {len(batches)} extraction call(s), "
+              f"{sum(len(t) for t, _ in results)} triple(s)")
+        return results
+
+    def build(self, store: GraphStore, chunks: list[Document]) -> int:
+        """Extract triples from *chunks* and add them to *store*."""
+        with store.lock:
+            return sum(store.add_triples(triples, source) for triples, source in self.extract(chunks))

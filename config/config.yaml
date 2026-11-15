@@ -27,11 +27,12 @@ indexing:
   multi_representation: "parent_document"
   parent_chunk_size: 1000   # tokens
   docstore_path: "./data/docstore.sqlite"
+  llm_concurrency: 4        # LLM calls at once while enriching (graph + RAPTOR) in the background
   # RAPTOR: cluster chunks and summarize each cluster, recursively, into a tree
   # of summaries searched alongside the chunks. One LLM call per cluster.
   raptor:
     enabled: true
-    cluster_size: 6
+    cluster_size: 10
     max_levels: 3
 
 # --- Embedding Model ---
@@ -64,11 +65,12 @@ relational_db:
 
 # --- Graph DB ---
 # An LLM extracts (entity)-[RELATION]->(entity) triples while indexing; the
-# graph is queried with Text-to-Cypher. Costs one LLM call per batch of chunks.
+# graph is queried with Text-to-Cypher. Runs in the background after a file is
+# already searchable: about one LLM call per 12k characters of text.
 graph_db:
   enabled: true
   path: "./data/graph.json"
-  extraction_batch_size: 3   # Parent chunks per extraction call
+  extraction_batch_chars: 12000   # text per extraction call (many chunks at once)
   max_results: 50
 
 # --- LLM ---
