@@ -172,7 +172,9 @@ reranking:
   enabled: true
   provider: "cross_encoder"  # cross_encoder | cohere | rankgpt | colbert
   model: "cross-encoder/ms-marco-MiniLM-L-6-v2"
-  candidates: 20            # Retrieved chunks the re-ranker scores
+  candidates: 10            # Retrieved chunks the re-ranker scores (20 → 10: -60% latency, same ranks;
+                            # see benchmarks/RESULTS.md)
+  max_length: 512           # tokens the cross-encoder reads; 256 halves cost but lost Hit@1 in benchmarks
   top_k: 5                  # Chunks passed to the LLM after re-ranking
   # For Cohere:
   # provider: "cohere"

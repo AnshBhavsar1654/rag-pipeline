@@ -70,7 +70,7 @@ class Reranker:
     def _init_cross_encoder(self) -> None:
         try:
             from sentence_transformers import CrossEncoder
-            self._cross_encoder = CrossEncoder(self._config.model)
+            self._cross_encoder = CrossEncoder(self._config.model, max_length=self._config.max_length)
             print(f"[RANK] Reranker: CrossEncoder ({self._config.model})")
         except ImportError:
             print("[WARN]  sentence-transformers not installed. Disabling re-ranking.")

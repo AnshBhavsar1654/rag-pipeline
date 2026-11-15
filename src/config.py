@@ -198,7 +198,10 @@ class RerankingConfig(BaseModel):
     enabled: bool = False
     provider: Literal["cross_encoder", "cohere", "rankgpt", "colbert"] = "cross_encoder"
     model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
-    candidates: int = 20    # How many retrieved chunks the reranker scores
+    candidates: int = 10    # How many retrieved chunks the reranker scores
+    # Tokens of (question + passage) the cross-encoder reads; its cost grows
+    # with this, so shorter is faster on CPU at some risk to ranking quality.
+    max_length: int = 512
     top_k: int = 5          # How many survive to the LLM
 
 
