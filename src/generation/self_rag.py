@@ -70,9 +70,15 @@ class AnswerGrader:
         self._chain = _CHECK_PROMPT | llm | StrOutputParser()
 
     def check(self, question: str, documents: list[Document], answer: str) -> AnswerCheck:
+        # Trimmed passages keep this check small (tokens-per-minute limits
+        # are easy to hit when the full context is sent a second time).
+        trimmed = [
+            Document(page_content=" ".join(d.page_content.split()[:350]), metadata=d.metadata)
+            for d in documents
+        ]
         try:
             reply = self._chain.invoke({
-                "context": format_context(documents), "question": question, "answer": answer,
+                "context": format_context(trimmed), "question": question, "answer": answer,
             })
         except Exception as e:
             print(f"[WARN]  Self-RAG check failed ({e}); accepting the answer.")

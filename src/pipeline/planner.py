@@ -93,7 +93,10 @@ class QueryPlanner:
         catalog: MetadataCatalog,
         use_filter: bool = True,
     ) -> Plan:
-        fallback = Plan([question], list(available), planned=False)
+        # Without a plan, search the vectorstore: querying every store would
+        # spend extra LLM calls (Text-to-SQL/Cypher) on a guess.
+        fallback = Plan([question], [VECTORSTORE] if VECTORSTORE in available else list(available)[:1],
+                        planned=False)
         if not self.needs_llm(available, catalog, use_filter):
             return fallback
 
@@ -114,7 +117,7 @@ class QueryPlanner:
             })
             data = _parse_json(reply)
         except Exception as e:  # noqa: BLE001
-            print(f"[WARN]  Query planning failed ({e}); searching every store with the question.")
+            print(f"[WARN]  Query planning failed ({e}); searching the vectorstore with the question.")
             return fallback
 
         extra = [str(q).strip() for q in (data.get("queries") or []) if str(q).strip()]

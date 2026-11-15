@@ -55,8 +55,10 @@ class TextToCypher:
         schema = self._store.schema()
         if not schema:
             return "", []
+        # One attempt: the Cypher dialect rejects some valid-looking queries,
+        # and a second LLM round-trip costs more latency than the fallback.
         error_block, cypher = "", ""
-        for _ in range(2):
+        for _ in range(1):
             try:
                 cypher = extract_cypher(self._chain.invoke({
                     "schema": schema, "question": question, "error_block": error_block,

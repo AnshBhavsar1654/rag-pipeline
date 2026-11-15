@@ -58,6 +58,10 @@ class TextToSQL:
                 sql = extract_sql(self._chain.invoke({
                     "schema": schema, "question": question, "error_block": error_block,
                 }))
+            except Exception as e:  # noqa: BLE001 - the LLM call itself failed: retrying won't help
+                print(f"[WARN]  Text-to-SQL could not reach the LLM: {e}")
+                return "", []
+            try:
                 columns, rows = self._store.run_select(sql, self._max_rows)
             except Exception as e:
                 print(f"[WARN]  Text-to-SQL attempt failed: {e}")
