@@ -123,6 +123,9 @@ class HybridConfig(BaseModel):
 class CRAGConfig(BaseModel):
     """Corrective RAG: grade documents, re-retrieve when too few are relevant."""
     enabled: bool = True
+    # "reranker": grade by cross-encoder score (no LLM call); "llm": ask the LLM
+    grader: Literal["reranker", "llm"] = "reranker"
+    min_score: float = -6.0     # Cross-encoder logit at or above which a passage counts as relevant
     min_relevant: int = 1       # Fewer relevant documents than this triggers re-retrieval
     web_search: bool = True     # Also search the web (DuckDuckGo) when re-retrieving
     web_results: int = 4
@@ -133,6 +136,9 @@ class RetrievalConfig(BaseModel):
         "simple", "multi_query", "rag_fusion", "hyde", "step_back", "decomposition"
     ] = "rag_fusion"
     top_k: int = 5
+    # One LLM call plans query translation, logical routing and the self-query
+    # filter together; false = one call per stage.
+    planner: bool = True
     hybrid: HybridConfig = Field(default_factory=HybridConfig)
     multi_query: MultiQueryConfig = Field(default_factory=MultiQueryConfig)
     rag_fusion: RAGFusionConfig = Field(default_factory=RAGFusionConfig)

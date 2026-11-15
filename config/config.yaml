@@ -101,6 +101,9 @@ llm:
 retrieval:
   strategy: "rag_fusion"    # simple | multi_query | rag_fusion | hyde | step_back | decomposition
   top_k: 5                  # Chunks passed to the LLM (when re-ranking is off)
+  # One LLM call plans query translation + logical routing + the self-query
+  # filter together (false: one call per stage, slower).
+  planner: true
 
   # Hybrid search: fuse dense vector search with BM25 keyword search (RRF).
   # Helps with names, IDs, and rare terms that embeddings blur together.
@@ -126,6 +129,8 @@ retrieval:
   # few are relevant, rewrite the query and search again (+ the web).
   crag:
     enabled: true
+    grader: "reranker"       # reranker (cross-encoder scores, no LLM call) | llm
+    min_score: -6.0          # cross-encoder logit; unrelated text scores about -10
     min_relevant: 1
     web_search: true         # DuckDuckGo, no API key
     web_results: 4

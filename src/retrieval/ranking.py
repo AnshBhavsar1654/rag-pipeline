@@ -106,6 +106,16 @@ class Reranker:
     def enabled(self) -> bool:
         return self._enabled
 
+    @property
+    def scores_relevance(self) -> bool:
+        """Whether rerank scores can stand in for an LLM relevance grade (CRAG)."""
+        return self._enabled and self._config.provider == "cross_encoder"
+
+    def warm_up(self) -> None:
+        """Run one tiny prediction so the first real query doesn't pay model start-up."""
+        if self._enabled and self._config.provider == "cross_encoder":
+            self._cross_encoder.predict([("warm up", "warm up")], show_progress_bar=False)
+
     def rerank(self, query: str, documents: list[Document]) -> list[Document]:
         """Re-rank documents and return the top_k."""
         if not self._enabled or not documents:
@@ -128,8 +138,7 @@ class Reranker:
     def _rerank_cross_encoder(self, query: str, documents: list[Document], top_k: int) -> list[Document]:
         pairs = [(query, doc.page_content) for doc in documents]
         scores = self._cross_encoder.predict(pairs, show_progress_bar=False)
-        ranked = sorted(zip(documents, scores), key=lambda x: x[1], reverse=True)
-        return [doc for doc, _ in ranked[:top_k]]
+        return _scored(documents, scores, top_k)
 
     def _rerank_rankgpt(self, query: str, documents: list[Document], top_k: int) -> list[Document]:
         passages = "\n".join(
@@ -148,5 +157,15 @@ class Reranker:
 
         (q,) = tokens([query])
         scores = [float((q @ d.T).max(dim=1).values.sum()) for d in tokens([d.page_content for d in documents])]
-        ranked = sorted(zip(documents, scores), key=lambda x: x[1], reverse=True)
-        return [doc for doc, _ in ranked[:top_k]]
+        return _scored(documents, scores, top_k)
+
+
+def _scored(documents: list[Document], scores, top_k: int) -> list[Document]:
+    """Copies of the best *top_k* documents with ``relevance_score`` set.
+
+    Copies, because the originals are shared with the keyword index."""
+    ranked = sorted(zip(documents, scores), key=lambda x: float(x[1]), reverse=True)[:top_k]
+    return [
+        Document(page_content=d.page_content, metadata={**d.metadata, "relevance_score": float(s)}, id=d.id)
+        for d, s in ranked
+    ]
