@@ -4,6 +4,7 @@ Benchmark any version of this pipeline on a fixed question set.
     python benchmarks/run.py                          # working tree, offline, every dataset
     python benchmarks/run.py --ref ac2f37a --ref HEAD # check out each commit and run it
     python benchmarks/run.py --dataset sample --llm   # also generate answers (uses API quota)
+    python benchmarks/run.py --ref A --ref B --repeat 3   # timings are noisy: compare medians
 
 Each run writes benchmarks/results/<dataset>/<date>_<commit>_<mode>.json;
 compare them with ``python benchmarks/compare.py``.
@@ -76,7 +77,6 @@ def run_version(ref: str, dataset: Path, llm: bool, workdir: Path, label: str | 
     info = commit_info(ref)
     if label:   # an experiment (e.g. a config change): keep it apart from the plain commit
         info.update(label=label, subject=label, commit=f"{info['commit']}/{label}")
-    tree = None
     if ref == "WORKTREE":
         code_dir = ROOT
     else:
@@ -84,7 +84,6 @@ def run_version(ref: str, dataset: Path, llm: bool, workdir: Path, label: str | 
         code_dir = workdir / f"tree-{sha}"
         if not code_dir.exists():
             git("worktree", "add", "--detach", str(code_dir), sha)
-        tree = code_dir
     mode = "llm" if llm else "offline"
     safe = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in info["commit"])
     out = RESULTS / dataset.stem / f"{datetime.now():%Y%m%d-%H%M%S}_{safe}_{mode}.json"
@@ -99,8 +98,6 @@ def run_version(ref: str, dataset: Path, llm: bool, workdir: Path, label: str | 
     scratch.mkdir(parents=True, exist_ok=True)
     started = time.time()
     proc = subprocess.run(cmd, cwd=scratch, env=env)
-    if tree is not None:
-        subprocess.run(["git", "worktree", "remove", "--force", str(tree)], cwd=ROOT, capture_output=True)
     if proc.returncode != 0 or not out.exists():
         print(f"!!! {info['commit']} failed (exit {proc.returncode}) after {time.time() - started:.0f}s")
         return None
@@ -127,11 +124,18 @@ def parent(args) -> None:
     written = []
     try:
         for dataset in runnable:
-            for ref in refs:
-                path = run_version(ref, dataset, args.llm, workdir, args.label)
-                if path:
-                    written.append(path)
+            # Round-robin: background load on the machine then hits every
+            # version alike instead of skewing one of them.
+            for round_ in range(args.repeat):
+                if args.repeat > 1:
+                    print(f"\n--- {dataset.stem}: round {round_ + 1} of {args.repeat}")
+                for ref in refs:
+                    path = run_version(ref, dataset, args.llm, workdir, args.label)
+                    if path:
+                        written.append(path)
     finally:
+        for tree in workdir.glob("tree-*"):
+            subprocess.run(["git", "worktree", "remove", "--force", str(tree)], cwd=ROOT, capture_output=True)
         subprocess.run(["git", "worktree", "prune"], cwd=ROOT, capture_output=True)
         shutil.rmtree(workdir, ignore_errors=True)
     if written:
@@ -200,6 +204,9 @@ def child(args) -> None:
     import yaml
 
     code_dir = Path(args.code_dir).resolve()
+    # API keys live in the main checkout's untracked .env, not in a worktree.
+    from dotenv import load_dotenv
+    load_dotenv(ROOT / ".env")
     sys.path.insert(0, str(code_dir))
     from src.config import RAGConfig
     from src.pipeline.rag_pipeline import RAGPipeline
@@ -339,6 +346,8 @@ def main() -> None:
     parser.add_argument("--dataset", action="append", help="dataset name (repeatable); default: all available")
     parser.add_argument("--llm", action="store_true", help="also generate and score answers (uses API quota)")
     parser.add_argument("--label", help="name this run as an experiment (e.g. after editing config.yaml)")
+    parser.add_argument("--repeat", type=int, default=1,
+                        help="runs per version, interleaved; timings are compared as medians (default 1)")
     parser.add_argument("--child", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--code-dir", help=argparse.SUPPRESS)
     parser.add_argument("--dataset-file", help=argparse.SUPPRESS)
