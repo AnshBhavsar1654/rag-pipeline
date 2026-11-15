@@ -1,0 +1,162 @@
+{
+  "version": {
+    "ref": "HEAD",
+    "commit": "f2c597b",
+    "subject": "benchmarks repeat interleaved and compare medians",
+    "date": "2026-11-16T02:19:15+05:30"
+  },
+  "dataset": {
+    "name": "aws_ml",
+    "description": "Amazon ML Developer Guide PDF, 202 pages (data/uploads/machinelearning-aws.pdf)",
+    "questions": 15,
+    "corpus": [
+      "data/uploads/machinelearning-aws.pdf"
+    ]
+  },
+  "mode": "offline",
+  "machine": {
+    "platform": "Windows-11-10.0.26200-SP0",
+    "python": "3.13.5",
+    "cpus": 16
+  },
+  "ran_at": "2026-11-16T02:25:16",
+  "ingestion": {
+    "seconds": 69.4,
+    "chunks": 508,
+    "llm_calls": 0,
+    "model_load_seconds": 5.79
+  },
+  "retrieval": {
+    "hit_at_1": 0.667,
+    "hit_at_3": 1.0,
+    "hit_at_5": 1.0,
+    "mrr": 0.822,
+    "docs_avg": 4.47,
+    "context_chars_avg": 7420,
+    "latency_ms_p50": 439.1,
+    "latency_ms_p95": 511.5,
+    "llm_calls_avg": 0
+  },
+  "questions": [
+    {
+      "question": "How many passes over the data does Amazon ML make by default?",
+      "rank": 1,
+      "docs": 5,
+      "context_chars": 10623,
+      "retrieve_ms": 486.6,
+      "retrieve_llm_calls": 0
+    },
+    {
+      "question": "Up to how many passes over the training data can you set?",
+      "rank": 1,
+      "docs": 5,
+      "context_chars": 12005,
+      "retrieve_ms": 398.7,
+      "retrieve_llm_calls": 0
+    },
+    {
+      "question": "What is the default maximum ML model size?",
+      "rank": 2,
+      "docs": 5,
+      "context_chars": 11613,
+      "retrieve_ms": 385.0,
+      "retrieve_llm_calls": 0
+    },
+    {
+      "question": "What is the default shuffle type for training data?",
+      "rank": 1,
+      "docs": 5,
+      "context_chars": 4159,
+      "retrieve_ms": 359.1,
+      "retrieve_llm_calls": 0
+    },
+    {
+      "question": "What is the maximum size of each observation?",
+      "rank": 1,
+      "docs": 4,
+      "context_chars": 5022,
+      "retrieve_ms": 439.1,
+      "retrieve_llm_calls": 0
+    },
+    {
+      "question": "How large can the training data be?",
+      "rank": 2,
+      "docs": 5,
+      "context_chars": 8339,
+      "retrieve_ms": 292.8,
+      "retrieve_llm_calls": 0
+    },
+    {
+      "question": "How many jobs can run simultaneously per account?",
+      "rank": 1,
+      "docs": 3,
+      "context_chars": 3666,
+      "retrieve_ms": 351.1,
+      "retrieve_llm_calls": 0
+    },
+    {
+      "question": "What is the longest a job can run before it is terminated?",
+      "rank": 1,
+      "docs": 2,
+      "context_chars": 2097,
+      "retrieve_ms": 332.1,
+      "retrieve_llm_calls": 0
+    },
+    {
+      "question": "How does the Amazon ML console split data between training and evaluation?",
+      "rank": 1,
+      "docs": 5,
+      "context_chars": 10041,
+      "retrieve_ms": 450.0,
+      "retrieve_llm_calls": 0
+    },
+    {
+      "question": "What is the default score threshold for binary classification?",
+      "rank": 2,
+      "docs": 5,
+      "context_chars": 7802,
+      "retrieve_ms": 375.4,
+      "retrieve_llm_calls": 0
+    },
+    {
+      "question": "What effect does L1 regularization have on a model?",
+      "rank": 2,
+      "docs": 5,
+      "context_chars": 11405,
+      "retrieve_ms": 439.1,
+      "retrieve_llm_calls": 0
+    },
+    {
+      "question": "What is the TPS limit for each real-time prediction endpoint?",
+      "rank": 3,
+      "docs": 5,
+      "context_chars": 3415,
+      "retrieve_ms": 441.8,
+      "retrieve_llm_calls": 0
+    },
+    {
+      "question": "How long can an Amazon ML ID string be?",
+      "rank": 1,
+      "docs": 5,
+      "context_chars": 8748,
+      "retrieve_ms": 468.2,
+      "retrieve_llm_calls": 0
+    },
+    {
+      "question": "What does an n-gram transformation with window size 2 produce?",
+      "rank": 1,
+      "docs": 3,
+      "context_chars": 5067,
+      "retrieve_ms": 569.7,
+      "retrieve_llm_calls": 0
+    },
+    {
+      "question": "How long are Amazon ML objects available after you create them?",
+      "rank": 1,
+      "docs": 5,
+      "context_chars": 7298,
+      "retrieve_ms": 454.2,
+      "retrieve_llm_calls": 0
+    }
+  ]
+}
