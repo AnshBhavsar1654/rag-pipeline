@@ -222,11 +222,11 @@ class ChatConfig(BaseModel):
 
 
 class UIConfig(BaseModel):
-    title: str = "[DOCS] RAG Chatbot"
+    title: str = "RAG Chatbot"
     description: str = "Ask questions about your documents"
-    theme: str = "soft"
-    share: bool = False
+    host: str = "127.0.0.1"
     port: int = 7860
+    upload_dir: str = "./data/uploads"
 
 
 # ---------------------------------------------------------------------------

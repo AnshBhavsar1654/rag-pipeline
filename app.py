@@ -1,27 +1,45 @@
 """
-RAG Pipeline — Gradio Web UI
+RAG Pipeline — Web UI (FastAPI + plain HTML/JS)
 
-Beautiful chat interface for the RAG pipeline with document upload.
+Serves a chat page that streams every pipeline step (query translation,
+routing, query construction, retrieval, generation) and the answer as
+Server-Sent Events, plus document upload.
 
 Usage:
     python app.py
-    python app.py --config path/to/config.yaml
-    python app.py --share  (public link)
+    python app.py --config path/to/config.yaml --port 8000
 """
 
+from __future__ import annotations
+
 import argparse
+import json
+import re
+import threading
+from pathlib import Path
 
-import gradio as gr
+from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
+from src.chat.chatbot import format_history, messages_from_dicts
+from src.generation.generator import source_label
+from src.indexing.loaders.loader import SUPPORTED_EXTENSIONS
 from src.pipeline.rag_pipeline import RAGPipeline
-from src.chat.chatbot import format_history, messages_from_gradio
 from src.stores.vectorstore import VectorStoreNotReadyError
 
 
-def create_app(config_path: str | None = None, share: bool = False):
-    """Create and launch the Gradio chatbot application."""
+WEB_DIR = Path(__file__).parent / "web"
 
-    # Initialize pipeline (auto-ingest if there is no usable vectorstore)
+
+class ChatRequest(BaseModel):
+    message: str
+    history: list[dict] = []
+
+
+def load_pipeline(config_path: str | None) -> RAGPipeline:
+    """Load the index, building it from the configured sources if there is none."""
     pipeline = RAGPipeline.from_config(config_path)
     try:
         pipeline.load()
@@ -33,128 +51,130 @@ def create_app(config_path: str | None = None, share: bool = False):
         except Exception as e:
             print(f"[ERROR] Ingestion failed: {e}")
         if not pipeline.is_ready:
-            print("[INFO] Starting with empty vector store. Upload documents via the UI.")
+            print("[INFO] Starting with an empty index. Upload documents in the UI.")
+    return pipeline
 
-    ui_config = pipeline.config.ui
-    memory_window = pipeline.config.chat.memory_window
 
-    def header() -> str:
-        strategy = pipeline.strategy_name if pipeline.is_ready else "N/A (ingest documents to start)"
-        return (
-            f"# {ui_config.title}\n\n"
-            f"{ui_config.description}\n\n"
-            f"**Retrieval Strategy:** {strategy} "
-            f"| **LLM:** {pipeline.config.llm.model}"
-        )
+def create_app(pipeline: RAGPipeline) -> FastAPI:
+    app = FastAPI(title=pipeline.config.ui.title)
+    # The pipeline (Chroma, the graph, model caches) is not thread-safe.
+    lock = threading.Lock()
 
-    # ---- Handlers ----
+    def status() -> dict:
+        cfg = pipeline.config
+        vectors = pipeline._vectorstore._collection.count() if pipeline._vectorstore is not None else 0
+        return {
+            "title": cfg.ui.title,
+            "description": cfg.ui.description,
+            "ready": pipeline.is_ready,
+            "strategy": pipeline.strategy_name,
+            "llm": cfg.llm.model,
+            "fallback": cfg.llm.fallback.model if cfg.llm.fallback else None,
+            "stores": {
+                "vectorstore": vectors,
+                "relational_db": len(pipeline.relational.table_names()),
+                "graph_db": pipeline.graph.graph.number_of_edges(),
+            },
+            "features": {
+                "indexing": f"{cfg.chunking.method} chunks · {cfg.indexing.multi_representation}"
+                            + (" · RAPTOR" if cfg.indexing.raptor.enabled else ""),
+                "routing": " · ".join(
+                    name for name, on in (("logical", cfg.routing.logical), ("semantic", cfg.routing.semantic)) if on
+                ) or "off",
+                "ranking": cfg.reranking.provider if cfg.reranking.enabled else "off",
+                "crag": cfg.retrieval.crag.enabled,
+                "self_rag": cfg.generation.self_rag.enabled,
+            },
+            "extensions": sorted(SUPPORTED_EXTENSIONS),
+        }
 
-    def upload_files(files):
-        """Handle uploaded files: ingest into vector store."""
-        if not files:
-            return "No files selected.", header()
-        try:
-            result = pipeline.ingest_files(list(files))
-        except Exception as e:
-            result = f"Ingestion failed: {e}"
-        return result, header()
+    @app.get("/")
+    def index():
+        return FileResponse(WEB_DIR / "index.html")
 
-    def respond(message: str, history: list[dict]):
-        """Stream the answer to *message*, using this session's chat history."""
-        if not message.strip():
-            yield ""
-            return
+    @app.get("/api/status")
+    def get_status():
+        return status()
 
+    @app.post("/api/upload")
+    def upload(files: list[UploadFile] = File(...)):
+        upload_dir = Path(pipeline.config.ui.upload_dir)
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        paths: list[str] = []
+        for f in files:
+            name = re.sub(r"[^\w.\- ]", "_", Path(f.filename or "upload").name)
+            if Path(name).suffix.lower() not in SUPPORTED_EXTENSIONS:
+                continue
+            target = upload_dir / name
+            target.write_bytes(f.file.read())
+            paths.append(str(target))
+        if not paths:
+            raise HTTPException(400, "No supported files. Use: " + ", ".join(sorted(SUPPORTED_EXTENSIONS)))
+        with lock:
+            try:
+                message = pipeline.ingest_files(paths)
+            except Exception as e:
+                raise HTTPException(500, f"Ingestion failed: {e}")
+        return {"message": message, "status": status()}
+
+    @app.post("/api/chat")
+    def chat(request: ChatRequest):
+        if not request.message.strip():
+            raise HTTPException(400, "Empty message.")
         if not pipeline.is_ready:
-            yield "No documents loaded yet. Upload and ingest documents first, then try again."
-            return
+            raise HTTPException(409, "No documents indexed yet. Upload documents first.")
 
-        # History comes from the browser session, so each user has their own
-        # conversation and the UI's clear button really resets it.
-        chat_history = format_history(messages_from_gradio(history), memory_window)
-
-        answer = ""
-        try:
-            stream, documents = pipeline.stream_query(message, chat_history)
-            for piece in stream:
-                answer += piece
-                yield answer
-            yield pipeline.format_response(answer, documents)
-        except Exception as e:
-            yield f"{answer}\n\n**Error:** {e}".strip()
-
-    # ---- Build the UI ----
-
-    theme_map = {
-        "soft": gr.themes.Soft(),
-        "default": gr.themes.Default(),
-        "glass": gr.themes.Glass(),
-    }
-    theme = theme_map.get(ui_config.theme, gr.themes.Soft())
-
-    with gr.Blocks(title=ui_config.title) as app:
-
-        header_md = gr.Markdown(header())
-
-        with gr.Row():
-            with gr.Column(scale=1):
-                file_upload = gr.File(
-                    label="Upload Documents",
-                    file_count="multiple",
-                    file_types=[".pdf", ".txt", ".md", ".docx", ".csv", ".html", ".htm"],
-                    type="filepath",
-                )
-                upload_btn = gr.Button("Ingest Documents", variant="primary", size="sm")
-                upload_status = gr.Markdown("*Upload PDF, TXT, MD, DOCX, CSV, or HTML files.*")
-
-        upload_btn.click(
-            fn=upload_files,
-            inputs=[file_upload],
-            outputs=[upload_status, header_md],
+        history = format_history(
+            messages_from_dicts(request.history), pipeline.config.chat.memory_window,
         )
 
-        gr.Markdown("---")
+        def stream():
+            with lock:
+                try:
+                    for event in pipeline.run(request.message, history):
+                        payload = {"kind": event.kind}
+                        if event.kind == "step":
+                            payload.update(stage=event.stage, message=event.message, data=event.data)
+                        elif event.kind == "token":
+                            payload["text"] = event.text
+                        elif event.kind == "done":
+                            payload["answer"] = event.answer
+                            payload["sources"] = [
+                                {
+                                    "n": i,
+                                    "label": source_label(d),
+                                    "type": d.metadata.get("type", "text"),
+                                    "url": d.metadata.get("source") if str(d.metadata.get("source", "")).startswith("http") else None,
+                                    "snippet": " ".join(d.page_content.split())[:400],
+                                }
+                                for i, d in enumerate(event.documents, start=1)
+                            ]
+                        yield f"data: {json.dumps(payload, default=str)}\n\n"
+                except Exception as e:
+                    yield f"data: {json.dumps({'kind': 'error', 'message': str(e)})}\n\n"
 
-        gr.ChatInterface(
-            fn=respond,
-            examples=[
-                "What is this document about?",
-                "Summarize the key points.",
-                "Explain the main concepts.",
-            ],
-        )
+        return StreamingResponse(stream(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
-    # Launch
-    app.launch(
-        server_port=ui_config.port,
-        share=share or ui_config.share,
-        show_error=True,
-        theme=theme,
-        css="""
-        .gradio-container { max-width: 900px !important; margin: auto; }
-        footer { display: none !important; }
-        """,
-    )
+    app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
+    return app
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Launch the RAG Chatbot web UI."
-    )
-    parser.add_argument(
-        "--config",
-        type=str,
-        default=None,
-        help="Path to config YAML file (default: config/config.yaml)",
-    )
-    parser.add_argument(
-        "--share",
-        action="store_true",
-        help="Create a public Gradio link",
-    )
+    parser = argparse.ArgumentParser(description="Launch the RAG Chatbot web UI.")
+    parser.add_argument("--config", type=str, default=None,
+                        help="Path to config YAML file (default: config/config.yaml)")
+    parser.add_argument("--host", type=str, default=None)
+    parser.add_argument("--port", type=int, default=None)
     args = parser.parse_args()
 
-    create_app(config_path=args.config, share=args.share)
+    import uvicorn
+
+    pipeline = load_pipeline(args.config)
+    ui = pipeline.config.ui
+    host, port = args.host or ui.host, args.port or ui.port
+    print(f"\n[UI] Open http://{'localhost' if host in ('0.0.0.0', '127.0.0.1') else host}:{port}\n")
+    uvicorn.run(create_app(pipeline), host=host, port=port, log_level="warning")
 
 
 if __name__ == "__main__":

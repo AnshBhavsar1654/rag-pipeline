@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RAG Chatbot</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js" defer></script>
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar" id="sidebar">
+      <div class="brand">
+        <div class="logo" aria-hidden="true">
+          <span style="background:var(--translation)"></span><span style="background:var(--routing)"></span><span style="background:var(--construction)"></span><span style="background:var(--retrieval)"></span><span style="background:var(--generation)"></span>
+        </div>
+        <div>
+          <h1 id="title">RAG Chatbot</h1>
+          <p id="description" class="muted">Ask questions about your documents</p>
+        </div>
+      </div>
+
+      <section>
+        <h2>Data stores</h2>
+        <ul class="stores">
+          <li><span class="dot" style="background:var(--indexing)"></span>Vectorstore<b id="s-vectorstore">–</b></li>
+          <li><span class="dot" style="background:var(--indexing)"></span>Relational DB<b id="s-relational_db">–</b></li>
+          <li><span class="dot" style="background:var(--indexing)"></span>Graph DB<b id="s-graph_db">–</b></li>
+        </ul>
+        <p class="hint">chunks · tables · relationships</p>
+      </section>
+
+      <section>
+        <h2>Add documents</h2>
+        <label class="drop" id="drop">
+          <input type="file" id="files" multiple hidden>
+          <span id="drop-text">Drop files or click to upload</span>
+          <small id="exts" class="muted"></small>
+        </label>
+        <p id="upload-status" class="hint" role="status"></p>
+      </section>
+
+      <section>
+        <h2>Pipeline</h2>
+        <dl class="features">
+          <div><dt><i style="background:var(--translation)"></i>Query translation</dt><dd id="f-strategy">–</dd></div>
+          <div><dt><i style="background:var(--routing)"></i>Routing</dt><dd id="f-routing">–</dd></div>
+          <div><dt><i style="background:var(--construction)"></i>Query construction</dt><dd>SQL · Cypher · self-query</dd></div>
+          <div><dt><i style="background:var(--indexing)"></i>Indexing</dt><dd id="f-indexing">–</dd></div>
+          <div><dt><i style="background:var(--retrieval)"></i>Retrieval</dt><dd id="f-retrieval">–</dd></div>
+          <div><dt><i style="background:var(--generation)"></i>Generation</dt><dd id="f-generation">–</dd></div>
+        </dl>
+        <p class="hint" id="f-llm"></p>
+      </section>
+    </aside>
+
+    <main class="chat">
+      <header class="topbar">
+        <button class="icon-btn" id="menu" aria-label="Show sidebar">☰</button>
+        <span class="muted" id="ready">Loading…</span>
+        <button class="ghost" id="clear">New chat</button>
+      </header>
+
+      <div class="messages" id="messages" aria-live="polite">
+        <div class="empty" id="empty">
+          <h2>Ask anything about your documents</h2>
+          <p class="muted">Each answer shows its path through the pipeline: translation, routing, query construction, retrieval and generation.</p>
+          <div class="suggestions">
+            <button>What is this document about?</button>
+            <button>Summarize the key points.</button>
+            <button>How are the main concepts related?</button>
+          </div>
+        </div>
+      </div>
+
+      <form class="composer" id="composer">
+        <textarea id="input" rows="1" placeholder="Ask a question…" aria-label="Question"></textarea>
+        <button type="submit" id="send">Send</button>
+      </form>
+    </main>
+  </div>
+</body>
+</html>

@@ -194,10 +194,10 @@ chat:
   show_sources: true         # Show source documents in responses
   rewrite_followups: true    # Turn follow-ups into standalone questions before searching
 
-# --- Gradio UI ---
+# --- Web UI (FastAPI) ---
 ui:
   title: "RAG Chatbot"
   description: "Ask questions about your documents"
-  theme: "soft"              # soft | default | glass
-  share: false               # Create public Gradio link
+  host: "127.0.0.1"          # use 0.0.0.0 to reach it from other machines
   port: 7860
+  upload_dir: "./data/uploads"   # files uploaded through the UI are kept here

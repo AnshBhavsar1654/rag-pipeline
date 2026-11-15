@@ -98,7 +98,7 @@ _RAG_PROMPT = ChatPromptTemplate.from_messages([
 SOURCES_HEADER = "**Sources**"
 
 
-def _source_label(doc: Document) -> str:
+def source_label(doc: Document) -> str:
     """Short human-readable origin of a chunk, e.g. ``report.pdf, p. 3 (table)``."""
     meta = doc.metadata
     source = str(meta.get("source", "Unknown"))
@@ -117,7 +117,7 @@ def format_context(documents: list[Document]) -> str:
     if not documents:
         return "(No relevant passages were found.)"
     return "\n\n".join(
-        f"[{i}] Source: {_source_label(doc)}\n{doc.page_content}"
+        f"[{i}] Source: {source_label(doc)}\n{doc.page_content}"
         for i, doc in enumerate(documents, start=1)
     )
 
@@ -180,5 +180,5 @@ def format_sources(documents: list[Document], snippet_chars: int = 150) -> str:
     lines: list[str] = []
     for i, doc in enumerate(documents, start=1):
         snippet = " ".join(doc.page_content.split())[:snippet_chars]
-        lines.append(f"- **[{i}]** {_source_label(doc)} — \"{snippet}...\"")
+        lines.append(f"- **[{i}]** {source_label(doc)} — \"{snippet}...\"")
     return "\n".join(lines)
