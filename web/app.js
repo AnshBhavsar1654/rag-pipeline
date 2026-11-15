@@ -80,9 +80,27 @@ async function refreshStatus() {
     else if (s.jobs.length) setState("busy", "Indexing in the background");
     else setState("ok", "Ready");
     for (const job of s.jobs) if (!pollingJobs.has(job.id)) pollJob(job.id);
+    refreshMetrics();
     return s;
   } catch {
     setState("bad", "Can't reach the server. Is app.py running?");
+  }
+}
+
+async function refreshMetrics() {
+  try {
+    const m = await (await fetch("/api/metrics")).json();
+    const v = m.versions[m.version];
+    if (!v || !v.questions) {
+      $("f-metrics").textContent = "";
+      return;
+    }
+    const median = v.total_ms_p50 != null ? `median answer ${seconds(Math.round(v.total_ms_p50))}` : "";
+    $("f-metrics").textContent =
+      `This version (${m.version}): ${v.questions} question${v.questions === 1 ? "" : "s"}, ${median}, ` +
+      `${v.llm_calls_avg} LLM calls each.`;
+  } catch {
+    /* metrics are optional */
   }
 }
 

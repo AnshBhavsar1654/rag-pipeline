@@ -32,6 +32,7 @@ from src.chat.chatbot import format_history, messages_from_dicts
 from src.generation.failover import friendly_error
 from src.generation.generator import source_label
 from src.indexing.loaders.loader import SUPPORTED_EXTENSIONS
+from src.monitoring.telemetry import code_version, summarize
 from src.pipeline.rag_pipeline import RAGPipeline
 from src.stores.vectorstore import VectorStoreNotReadyError
 
@@ -186,6 +187,16 @@ def create_app(pipeline: RAGPipeline) -> FastAPI:
     @app.get("/api/status")
     def get_status():
         return status()
+
+    @app.get("/api/metrics")
+    def metrics():
+        """Telemetry per code version, plus this version's recent questions."""
+        recent = [
+            {k: r[k] for k in ("ts", "total_ms", "first_token_ms", "llm_calls", "failovers", "error", "stage_ms")}
+            for r in pipeline.telemetry.rows("queries", limit=20)
+            if r["version"] == code_version()
+        ]
+        return {"version": code_version(), "versions": summarize(pipeline.telemetry), "recent": recent}
 
     @app.get("/api/documents")
     def documents():
