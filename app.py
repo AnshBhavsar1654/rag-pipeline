@@ -15,7 +15,7 @@ import gradio as gr
 
 from src.pipeline.rag_pipeline import RAGPipeline
 from src.chat.chatbot import format_history, messages_from_gradio
-from src.vectorstore.store import VectorStoreNotReadyError
+from src.stores.vectorstore import VectorStoreNotReadyError
 
 
 def create_app(config_path: str | None = None, share: bool = False):

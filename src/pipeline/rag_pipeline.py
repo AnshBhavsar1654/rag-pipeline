@@ -15,10 +15,10 @@ from langchain_core.embeddings import Embeddings
 from langchain_core.language_models import BaseChatModel
 
 from src.config import RAGConfig, load_config
-from src.document_loaders.loader import load_documents, _load_from_file
-from src.chunking.splitter import split_documents
-from src.embeddings.embedder import create_embeddings, max_input_tokens
-from src.vectorstore.store import (
+from src.indexing.loaders.loader import load_documents, _load_from_file
+from src.indexing.chunking import split_documents
+from src.indexing.embeddings import create_embeddings, max_input_tokens
+from src.stores.vectorstore import (
     EmbeddingMismatchError,
     VectorStoreNotReadyError,
     add_documents,
@@ -32,13 +32,13 @@ from src.vectorstore.store import (
 )
 from src.retrieval.base_retriever import BaseRAGRetriever
 from src.retrieval.hybrid import HybridRetriever
-from src.retrieval.multi_query import MultiQueryRetriever
-from src.retrieval.rag_fusion import RAGFusionRetriever
-from src.retrieval.hyde import HyDERetriever
-from src.retrieval.reranker import Reranker
-from src.query_transform.condense import QuestionCondenser
-from src.query_transform.decomposition import DecompositionRetriever
-from src.query_transform.step_back import StepBackRetriever
+from src.query_translation.multi_query import MultiQueryRetriever
+from src.query_translation.rag_fusion import RAGFusionRetriever
+from src.query_translation.hyde import HyDERetriever
+from src.retrieval.ranking import Reranker
+from src.query_translation.condense import QuestionCondenser
+from src.query_translation.decomposition import DecompositionRetriever
+from src.query_translation.step_back import StepBackRetriever
 from src.generation.generator import (
     SOURCES_HEADER,
     create_llm,

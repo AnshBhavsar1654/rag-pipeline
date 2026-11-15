@@ -104,7 +104,7 @@ def _load_from_file(
     # --- Extract tables and images from PDFs ---
     if ext == ".pdf" and extraction_config and extraction_config.enabled:
         if extraction_config.table_extraction:
-            from src.document_loaders.table_extractor import extract_tables_from_pdf
+            from src.indexing.loaders.table_extractor import extract_tables_from_pdf
 
             table_docs = extract_tables_from_pdf(file_path, extraction_config)
             if table_docs:
@@ -112,7 +112,7 @@ def _load_from_file(
                 docs.extend(table_docs)
 
         if extraction_config.ocr_enabled:
-            from src.document_loaders.image_extractor import extract_images_from_pdf
+            from src.indexing.loaders.image_extractor import extract_images_from_pdf
 
             image_docs = extract_images_from_pdf(file_path, extraction_config)
             if image_docs:
@@ -122,7 +122,7 @@ def _load_from_file(
     # --- Extract tables from DOCX ---
     if ext == ".docx" and extraction_config and extraction_config.enabled:
         if extraction_config.table_extraction:
-            from src.document_loaders.table_extractor import extract_tables_from_docx
+            from src.indexing.loaders.table_extractor import extract_tables_from_docx
 
             table_docs = extract_tables_from_docx(file_path, extraction_config)
             if table_docs:

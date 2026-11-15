@@ -13,7 +13,7 @@ from src.generation.generator import SOURCES_HEADER, generate_answer
 from src.pipeline.rag_pipeline import RAGPipeline
 from src.retrieval.hybrid import HybridRetriever
 from src.retrieval.utils import parse_query_list, reciprocal_rank_fusion
-from src.vectorstore.store import (
+from src.stores.vectorstore import (
     VectorStoreNotReadyError,
     build_vectorstore,
     load_vectorstore,
@@ -82,7 +82,7 @@ def test_bm25_finds_exact_terms_dense_search_misses(tmp_path, embeddings):
         RAGConfig(vectorstore={"persist_directory": str(tmp_path)}).vectorstore,
         embeddings, "fake", docs,
     )
-    from src.vectorstore.store import all_documents
+    from src.stores.vectorstore import all_documents
 
     retriever = HybridRetriever(vs, all_documents(vs), k=2, fetch_k=3)
     assert "QX-77812" in retriever.invoke("what colour is QX-77812")[0].page_content
