@@ -210,9 +210,9 @@ def test_follow_up_is_rewritten_before_search(config, embeddings, monkeypatch):
     pipeline.ingest()
 
     searched: list[str] = []
-    original = pipeline._retriever.retrieve
+    original = pipeline._translator.translate
     monkeypatch.setattr(
-        pipeline._retriever, "retrieve", lambda q: searched.append(q) or original(q)
+        pipeline._translator, "translate", lambda q: searched.append(q) or original(q)
     )
 
     answer, _ = pipeline.query("How often?", chat_history="Human: Tell me about the filter")

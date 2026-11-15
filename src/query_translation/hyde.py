@@ -1,19 +1,17 @@
 """
-RAG Pipeline — HyDE Retrieval (Part 9)
+Query Translation — HyDE (pseudo-documents)
 
-Hypothetical Document Embeddings: generates a hypothetical answer to the
-question, then uses that answer's embedding to retrieve similar real documents.
+Writes a hypothetical passage that would answer the question and searches
+with it as well: it looks more like the real answer than the question does.
 """
 
 from __future__ import annotations
 
-from langchain_core.documents import Document
 from langchain_core.language_models import BaseChatModel
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 
-from src.retrieval.base_retriever import BaseRAGRetriever
-from src.retrieval.utils import SearchRetriever, reciprocal_rank_fusion
+from src.query_translation.base import QueryTranslator
 
 
 _DEFAULT_HYDE_TEMPLATE = """\
@@ -22,42 +20,20 @@ Question: {question}
 Passage:"""
 
 
-class HyDERetriever(BaseRAGRetriever):
-    """HyDE: generate a hypothetical document, then retrieve similar real docs."""
+class HyDETranslator(QueryTranslator):
+    name = "HyDE"
 
-    def __init__(
-        self,
-        retriever: SearchRetriever,
-        llm: BaseChatModel,
-        hypothesis_prompt: str | None = None,
-        rrf_k: int = 60,
-    ):
-        self._retriever = retriever
-        self._llm = llm
-        self._rrf_k = rrf_k
-
+    def __init__(self, llm: BaseChatModel, hypothesis_prompt: str | None = None, rrf_k: int = 60):
+        super().__init__(rrf_k)
         template = hypothesis_prompt or _DEFAULT_HYDE_TEMPLATE
-        self._hypothesis_chain = (
-            ChatPromptTemplate.from_template(template)
-            | self._llm
-            | StrOutputParser()
-        )
+        self._chain = ChatPromptTemplate.from_template(template) | llm | StrOutputParser()
 
-    @property
-    def strategy_name(self) -> str:
-        return "HyDE"
-
-    def retrieve(self, question: str) -> list[Document]:
+    def translate(self, question: str) -> list[str]:
+        # The question stays in the list so a hallucinated passage that
+        # drifts off-topic can't take over the ranking on its own.
         try:
-            hypothetical_doc = self._hypothesis_chain.invoke({"question": question})
+            passage = self._chain.invoke({"question": question}).strip()
         except Exception as e:
             print(f"[WARN]  HyDE generation failed ({e}); using the original question only.")
-            return self._retriever.invoke(question)
-
-        # The hypothetical passage finds documents that *look like* an answer;
-        # the question itself guards against a hallucinated passage drifting
-        # off-topic. Fuse both rankings.
-        return reciprocal_rank_fusion(
-            [self._retriever.invoke(hypothetical_doc), self._retriever.invoke(question)],
-            k=self._rrf_k,
-        )
+            return [question]
+        return [question, passage] if passage else [question]

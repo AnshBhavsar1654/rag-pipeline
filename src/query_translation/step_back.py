@@ -1,13 +1,12 @@
 """
-RAG Pipeline — Step-Back Prompting (Part 8)
+Query Translation — Step-Back Prompting
 
-Generates a more generic "step-back" question to retrieve broader context,
-then combines with direct retrieval for more comprehensive answers.
+Adds a more generic "step-back" question so the search also brings back
+background context, fused behind the specific matches.
 """
 
 from __future__ import annotations
 
-from langchain_core.documents import Document
 from langchain_core.language_models import BaseChatModel
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import (
@@ -15,11 +14,9 @@ from langchain_core.prompts import (
     FewShotChatMessagePromptTemplate,
 )
 
-from src.retrieval.base_retriever import BaseRAGRetriever
-from src.retrieval.utils import SearchRetriever, reciprocal_rank_fusion
+from src.query_translation.base import QueryTranslator
 
 
-# Few-shot examples for step-back prompting
 _STEP_BACK_EXAMPLES = [
     {
         "input": "Could the members of The Police perform lawful arrests?",
@@ -36,20 +33,13 @@ _STEP_BACK_EXAMPLES = [
 ]
 
 
-class StepBackRetriever(BaseRAGRetriever):
-    """Retrieve for both the question and a more generic step-back question."""
+class StepBackTranslator(QueryTranslator):
+    """Search with both the question and a more generic step-back question."""
 
-    def __init__(
-        self,
-        retriever: SearchRetriever,
-        llm: BaseChatModel,
-        rrf_k: int = 60,
-    ):
-        self._retriever = retriever
-        self._llm = llm
-        self._rrf_k = rrf_k
+    name = "Step-Back"
 
-        # Build few-shot prompt for step-back question generation
+    def __init__(self, llm: BaseChatModel, rrf_k: int = 60):
+        super().__init__(rrf_k)
         example_prompt = ChatPromptTemplate.from_messages([
             ("human", "{input}"),
             ("ai", "{output}"),
@@ -68,24 +58,14 @@ class StepBackRetriever(BaseRAGRetriever):
             few_shot_prompt,
             ("user", "{question}"),
         ])
+        self._chain = prompt | llm | StrOutputParser()
 
-        self._step_back_chain = prompt | self._llm | StrOutputParser()
-
-    @property
-    def strategy_name(self) -> str:
-        return "Step-Back"
-
-    def retrieve(self, question: str) -> list[Document]:
-        """Retrieve documents using both the original and step-back question,
-        fusing the two rankings so specific matches stay ahead of background.
-        """
-        normal_docs = self._retriever.invoke(question)
-
+    def translate(self, question: str) -> list[str]:
         try:
-            step_back_q = self._step_back_chain.invoke({"question": question}).strip()
+            step_back = self._chain.invoke({"question": question}).strip()
         except Exception as e:
             print(f"[WARN]  Step-back generation failed ({e}); using the original question only.")
-            return normal_docs
-
-        step_back_docs = self._retriever.invoke(step_back_q)
-        return reciprocal_rank_fusion([normal_docs, step_back_docs], k=self._rrf_k)
+            return [question]
+        if not step_back or step_back.lower() == question.strip().lower():
+            return [question]
+        return [question, step_back]

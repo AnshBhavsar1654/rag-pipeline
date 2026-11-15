@@ -30,15 +30,11 @@ from src.stores.vectorstore import (
     load_vectorstore,
     read_stored_documents,
 )
-from src.retrieval.base_retriever import BaseRAGRetriever
 from src.retrieval.hybrid import HybridRetriever
-from src.query_translation.multi_query import MultiQueryRetriever
-from src.query_translation.rag_fusion import RAGFusionRetriever
-from src.query_translation.hyde import HyDERetriever
 from src.retrieval.ranking import Reranker
+from src.query_translation import create_translator
+from src.query_translation.base import QueryTranslator
 from src.query_translation.condense import QuestionCondenser
-from src.query_translation.decomposition import DecompositionRetriever
-from src.query_translation.step_back import StepBackRetriever
 from src.generation.generator import (
     SOURCES_HEADER,
     create_llm,
@@ -66,7 +62,7 @@ class RAGPipeline:
         self.config = config
         self._llm: BaseChatModel | None = None
         self._embeddings: Embeddings | None = None
-        self._retriever: BaseRAGRetriever | None = None
+        self._translator: QueryTranslator | None = None
         self._reranker: Reranker | None = None
         self._condenser: QuestionCondenser | None = None
         self._vectorstore = None
@@ -93,13 +89,13 @@ class RAGPipeline:
 
     @property
     def is_ready(self) -> bool:
-        return self._retriever is not None
+        return self._base_retriever is not None
 
     @property
     def strategy_name(self) -> str:
-        if self._retriever is None:
+        if self._translator is None:
             return "N/A"
-        name = self._retriever.strategy_name
+        name = self._translator.name
         if self._base_retriever is not None and self._base_retriever.uses_bm25:
             name += " + hybrid BM25"
         if self._reranker is not None and self._reranker.enabled:
@@ -295,46 +291,7 @@ class RAGPipeline:
             rrf_k=hybrid.rrf_k,
             use_bm25=hybrid.enabled,
         )
-        self._retriever = self._create_retriever()
-
-    def _create_retriever(self) -> BaseRAGRetriever:
-        """Create the appropriate retrieval strategy based on config."""
-        retrieval = self.config.retrieval
-        strategy = retrieval.strategy
-
-        if strategy == "simple":
-            return _SimpleRetriever(self._base_retriever)
-
-        elif strategy == "multi_query":
-            return MultiQueryRetriever(
-                retriever=self._base_retriever,
-                llm=self.llm,
-                num_queries=retrieval.multi_query.num_queries,
-            )
-
-        elif strategy == "rag_fusion":
-            return RAGFusionRetriever(
-                retriever=self._base_retriever,
-                llm=self.llm,
-                num_queries=retrieval.rag_fusion.num_queries,
-                rrf_k=retrieval.rag_fusion.rrf_k,
-            )
-
-        elif strategy == "hyde":
-            return HyDERetriever(
-                retriever=self._base_retriever,
-                llm=self.llm,
-                hypothesis_prompt=retrieval.hyde.hypothesis_prompt,
-            )
-
-        elif strategy == "step_back":
-            return StepBackRetriever(retriever=self._base_retriever, llm=self.llm)
-
-        elif strategy == "decomposition":
-            return DecompositionRetriever(retriever=self._base_retriever, llm=self.llm)
-
-        else:
-            raise ValueError(f"Unknown retrieval strategy: {strategy}")
+        self._translator = create_translator(retrieval, self.llm)
 
     # -----------------------------------------------------------------
     # Query
@@ -342,7 +299,7 @@ class RAGPipeline:
 
     def retrieve(self, question: str, chat_history: str = "") -> list[Document]:
         """Find the chunks to answer *question* with: rewrite → search → rerank → cap."""
-        if self._retriever is None:
+        if self._base_retriever is None:
             raise RuntimeError("Pipeline not loaded. Call .load() or .ingest() first.")
 
         # 1. Make follow-ups standalone so the search sees the full intent
@@ -354,8 +311,9 @@ class RAGPipeline:
             if search_query != question:
                 print(f"[QUERY] Rewrote follow-up as: {search_query}")
 
-        # 2. Retrieve with the configured strategy
-        documents = self._retriever.retrieve(search_query)
+        # 2. Query translation, then search with every query and fuse
+        queries = self._translator.translate(search_query)
+        documents = self._translator.fuse([self._base_retriever.invoke(q) for q in queries])
 
         # 3. Re-rank a candidate pool, or just keep the best top_k
         if self._reranker is not None and self._reranker.enabled:
@@ -415,21 +373,3 @@ class RAGPipeline:
                 response += f"\n\n{SOURCES_HEADER}\n{sources}"
 
         return response
-
-
-# ---------------------------------------------------------------------------
-# Simple retriever (no query transformation)
-# ---------------------------------------------------------------------------
-
-class _SimpleRetriever(BaseRAGRetriever):
-    """Simple retriever — direct (hybrid) search with the question as-is."""
-
-    def __init__(self, retriever):
-        self._retriever = retriever
-
-    @property
-    def strategy_name(self) -> str:
-        return "Simple"
-
-    def retrieve(self, question: str) -> list[Document]:
-        return self._retriever.invoke(question)

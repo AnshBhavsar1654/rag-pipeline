@@ -64,13 +64,3 @@ def parse_query_list(text: str, limit: int | None = None) -> list[str]:
         if line not in queries:
             queries.append(line)
     return queries[:limit] if limit is not None else queries
-
-
-def search_all(
-    retriever: SearchRetriever,
-    question: str,
-    queries: list[str],
-) -> list[list[Document]]:
-    """Run the original question plus each generated query through the retriever."""
-    all_queries = [question] + [q for q in queries if q.strip().lower() != question.strip().lower()]
-    return [retriever.invoke(q) for q in all_queries]
