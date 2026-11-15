@@ -5,83 +5,78 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>RAG Chatbot</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/style.css">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js" defer></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js" defer></script>
   <script src="/static/app.js" defer></script>
 </head>
 <body>
-  <div class="layout">
-    <aside class="sidebar" id="sidebar">
-      <div class="brand">
-        <div class="logo" aria-hidden="true">
-          <span style="background:var(--translation)"></span><span style="background:var(--routing)"></span><span style="background:var(--construction)"></span><span style="background:var(--retrieval)"></span><span style="background:var(--generation)"></span>
-        </div>
-        <div>
-          <h1 id="title">RAG Chatbot</h1>
-          <p id="description" class="muted">Ask questions about your documents</p>
-        </div>
-      </div>
+  <div class="shell">
+    <aside class="library" id="library" aria-label="Your documents">
+      <header class="library-head">
+        <h1 id="title">RAG Chatbot</h1>
+        <button class="icon-btn close-library" id="close-library" aria-label="Close documents">✕</button>
+      </header>
 
-      <section>
-        <h2>Data stores</h2>
-        <ul class="stores">
-          <li><span class="dot" style="background:var(--indexing)"></span>Vectorstore<b id="s-vectorstore">–</b></li>
-          <li><span class="dot" style="background:var(--indexing)"></span>Relational DB<b id="s-relational_db">–</b></li>
-          <li><span class="dot" style="background:var(--indexing)"></span>Graph DB<b id="s-graph_db">–</b></li>
-        </ul>
-        <p class="hint">chunks · tables · relationships</p>
-      </section>
-
-      <section>
-        <h2>Add documents</h2>
-        <label class="drop" id="drop">
+      <section class="docs">
+        <div class="docs-head">
+          <h2>Documents</h2>
+          <label class="add-btn" for="files">Add files</label>
           <input type="file" id="files" multiple hidden>
-          <span id="drop-text">Drop files or click to upload</span>
-          <small id="exts" class="muted"></small>
-        </label>
-        <p id="upload-status" class="hint" role="status"></p>
+        </div>
+        <ul id="doc-list" class="doc-list"></ul>
+        <p id="doc-empty" class="hint" hidden>No documents yet. Add a PDF, Word file, CSV, Markdown or HTML file to start.</p>
+        <p id="upload-note" class="hint" role="status"></p>
       </section>
 
-      <section>
-        <h2>Pipeline</h2>
-        <dl class="features">
-          <div><dt><i style="background:var(--translation)"></i>Query translation</dt><dd id="f-strategy">–</dd></div>
-          <div><dt><i style="background:var(--routing)"></i>Routing</dt><dd id="f-routing">–</dd></div>
-          <div><dt><i style="background:var(--construction)"></i>Query construction</dt><dd>SQL · Cypher · self-query</dd></div>
-          <div><dt><i style="background:var(--indexing)"></i>Indexing</dt><dd id="f-indexing">–</dd></div>
-          <div><dt><i style="background:var(--retrieval)"></i>Retrieval</dt><dd id="f-retrieval">–</dd></div>
-          <div><dt><i style="background:var(--generation)"></i>Generation</dt><dd id="f-generation">–</dd></div>
-        </dl>
+      <section class="about">
+        <h2>How answers are found</h2>
+        <ol class="stages">
+          <li style="--c: var(--translation)"><b>Translate</b> <span id="f-strategy">the question into search queries</span></li>
+          <li style="--c: var(--routing)"><b>Route</b> <span id="f-routing">to the right store</span></li>
+          <li style="--c: var(--construction)"><b>Construct</b> <span>SQL, Cypher or a filter</span></li>
+          <li style="--c: var(--retrieval)"><b>Retrieve</b> <span id="f-retrieval">and keep what's relevant</span></li>
+          <li style="--c: var(--generation)"><b>Answer</b> <span id="f-generation">with citations</span></li>
+        </ol>
+        <p class="hint" id="f-stores"></p>
         <p class="hint" id="f-llm"></p>
       </section>
     </aside>
 
-    <main class="chat">
+    <main class="reader">
       <header class="topbar">
-        <button class="icon-btn" id="menu" aria-label="Show sidebar">☰</button>
-        <span class="muted" id="ready">Loading…</span>
-        <button class="ghost" id="clear">New chat</button>
+        <button class="icon-btn open-library" id="open-library" aria-label="Show documents">☰</button>
+        <span class="state" id="state"><i></i><span>Connecting…</span></span>
+        <button class="text-btn" id="new-chat">New chat</button>
       </header>
 
-      <div class="messages" id="messages" aria-live="polite">
-        <div class="empty" id="empty">
-          <h2>Ask anything about your documents</h2>
-          <p class="muted">Each answer shows its path through the pipeline: translation, routing, query construction, retrieval and generation.</p>
-          <div class="suggestions">
+      <div class="thread" id="thread" aria-live="polite">
+        <section class="welcome" id="welcome">
+          <h2 id="welcome-title">Ask your documents anything</h2>
+          <p id="welcome-text">Answers quote the passages they come from, and the coloured bar under each question shows how the answer was found and how long each step took.</p>
+          <div class="suggestions" id="suggestions">
             <button>What is this document about?</button>
             <button>Summarize the key points.</button>
-            <button>How are the main concepts related?</button>
+            <button>How are the main ideas related?</button>
           </div>
-        </div>
+          <label class="dropzone" id="dropzone" for="files" hidden>
+            <b>Add a document to start</b>
+            <span>Drop files here or choose them. PDF, DOCX, CSV, Markdown, TXT and HTML work.</span>
+          </label>
+        </section>
       </div>
 
       <form class="composer" id="composer">
-        <textarea id="input" rows="1" placeholder="Ask a question…" aria-label="Question"></textarea>
-        <button type="submit" id="send">Send</button>
+        <div class="field">
+          <textarea id="input" rows="1" placeholder="Ask a question about your documents" aria-label="Your question"></textarea>
+          <button type="submit" id="send" class="send">Ask</button>
+        </div>
+        <p class="composer-hint">Enter to ask, Shift + Enter for a new line</p>
       </form>
     </main>
   </div>
+  <div class="drag-veil" id="drag-veil" hidden><p>Drop to add to your documents</p></div>
 </body>
 </html>

@@ -128,9 +128,9 @@ def create_app(pipeline: RAGPipeline) -> FastAPI:
                 "graph_db": pipeline.graph.graph.number_of_edges(),
             },
             "features": {
-                "indexing": f"{cfg.chunking.method} chunks · {cfg.indexing.multi_representation.replace('_', ' ')}"
-                            + (" · RAPTOR" if cfg.indexing.raptor.enabled else ""),
-                "routing": " · ".join(
+                "indexing": f"{cfg.chunking.method} chunks, {cfg.indexing.multi_representation.replace('_', ' ')}"
+                            + (", RAPTOR" if cfg.indexing.raptor.enabled else ""),
+                "routing": " and ".join(
                     name for name, on in (("logical", cfg.routing.logical), ("semantic", cfg.routing.semantic)) if on
                 ) or "off",
                 "ranking": cfg.reranking.provider.replace("_", "-") if cfg.reranking.enabled else "off",
@@ -139,7 +139,19 @@ def create_app(pipeline: RAGPipeline) -> FastAPI:
             },
             "extensions": sorted(SUPPORTED_EXTENSIONS),
             "jobs": [asdict(j) for j in active_jobs()],
+            "models": pipeline.llm.status() if hasattr(pipeline.llm, "status") else [],
         }
+
+    def chat_error_message(error: Exception) -> str:
+        """Friendly text; when every model is paused, say when one is back."""
+        models = pipeline.llm.status() if hasattr(pipeline.llm, "status") else []
+        if models and all(m["paused_for"] > 0 for m in models):
+            soonest = min(m["paused_for"] for m in models)
+            when = (f"{round(soonest / 3600)} hours" if soonest >= 5400
+                    else f"{max(1, round(soonest / 60))} minutes" if soonest >= 60 else f"{soonest} seconds")
+            return (f"Every configured AI model has hit its usage limit. The next one is available "
+                    f"again in about {when}. Add another provider's API key or a paid plan to avoid the wait.")
+        return friendly_error(error)
 
     def run_job(job: Job, paths: list[str]) -> None:
         try:
@@ -274,7 +286,7 @@ def create_app(pipeline: RAGPipeline) -> FastAPI:
                         })
             except Exception as e:  # noqa: BLE001
                 print(f"[ERROR] Chat failed: {e}")
-                yield _event_json({"kind": "error", "message": friendly_error(e)})
+                yield _event_json({"kind": "error", "message": chat_error_message(e)})
 
         return StreamingResponse(stream(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
