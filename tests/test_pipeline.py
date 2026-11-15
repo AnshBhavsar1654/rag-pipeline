@@ -214,9 +214,9 @@ def test_follow_up_is_rewritten_before_search(config, embeddings, monkeypatch):
     pipeline.ingest()
 
     searched: list[str] = []
-    original = pipeline._translator.translate
+    original = pipeline._search
     monkeypatch.setattr(
-        pipeline._translator, "translate", lambda q: searched.append(q) or original(q)
+        pipeline, "_search", lambda queries, *a: searched.extend(queries) or original(queries, *a)
     )
 
 

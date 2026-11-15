@@ -97,7 +97,6 @@ class SelfQueryConstructor:
     def construct(self, question: str, catalog: MetadataCatalog) -> MetadataFilter:
         if not catalog.filterable:
             return MetadataFilter()
-        by_name = {Path(s).name.lower(): s for s in catalog.sources}
         try:
             reply = self._chain.invoke({
                 "question": question,
@@ -111,17 +110,25 @@ class SelfQueryConstructor:
             print(f"[WARN]  Self-query failed ({e}); searching without a filter.")
             return MetadataFilter()
 
-        conditions: dict[str, list] = {}
-        sources = [by_name[str(s).lower()] for s in _as_list(data.get("source")) if str(s).lower() in by_name]
-        if sources:
-            conditions["source"] = sources
-        types = [t for t in _as_list(data.get("type")) if t in catalog.types]
-        if types:
-            conditions["type"] = types
-        pages = [int(p) for p in _as_list(data.get("page")) if str(p).isdigit() and 0 < int(p) <= catalog.max_page]
-        if pages:
-            conditions["page"] = pages
-        return MetadataFilter(conditions)
+        return filter_from_json(data, catalog)
+
+
+def filter_from_json(data: dict, catalog: MetadataCatalog) -> MetadataFilter:
+    """Build a filter from a model's JSON, keeping only values that exist in the index."""
+    if not isinstance(data, dict):
+        return MetadataFilter()
+    by_name = {Path(s).name.lower(): s for s in catalog.sources}
+    conditions: dict[str, list] = {}
+    sources = [by_name[str(s).lower()] for s in _as_list(data.get("source")) if str(s).lower() in by_name]
+    if sources:
+        conditions["source"] = sources
+    types = [t for t in _as_list(data.get("type")) if t in catalog.types]
+    if types:
+        conditions["type"] = types
+    pages = [int(p) for p in _as_list(data.get("page")) if str(p).isdigit() and 0 < int(p) <= catalog.max_page]
+    if pages:
+        conditions["page"] = pages
+    return MetadataFilter(conditions)
 
 
 def _as_list(value) -> list:

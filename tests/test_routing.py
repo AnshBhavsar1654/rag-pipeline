@@ -129,3 +129,34 @@ def test_raptor_builds_levels_until_one_summary():
 def test_triples_survive_a_reply_cut_off_mid_json():
     cut = TRIPLES[: TRIPLES.rindex('"tail"')]  # second triple truncated
     assert [t["tail"] for t in parse_triples(cut)] == ["OpenAI"]
+
+
+def test_planner_returns_queries_routes_and_filter_from_one_call():
+    from src.pipeline.planner import QueryPlanner
+    from src.query_translation.rag_fusion import RAGFusionTranslator
+
+    docs = [Document(page_content="a", metadata={"source": "/x/report.pdf", "type": "text"}),
+            Document(page_content="b", metadata={"source": "/x/notes.md", "type": "table"})]
+    catalog = MetadataCatalog.from_documents(docs)
+    reply = ('```json\n{"queries": ["q one", "q two"], "datasources": ["relational_db", "nowhere"],'
+             ' "filter": {"source": ["report.pdf"]}}\n```')
+    llm = FakeListChatModel(responses=[reply])
+    planner = QueryPlanner(llm, "rag_fusion", num_queries=4)
+    plan = planner.plan("total revenue?", RAGFusionTranslator(llm),
+                        {"vectorstore": "text", "relational_db": "tables"}, catalog)
+    assert plan.queries == ["total revenue?", "q one", "q two"]
+    assert plan.datasources == ["relational_db"]
+    assert plan.metadata_filter.conditions == {"source": ["/x/report.pdf"]}
+
+
+def test_planner_skips_the_llm_when_nothing_needs_deciding():
+    from src.pipeline.planner import QueryPlanner
+    from src.query_translation.base import QueryTranslator
+
+    class NoCalls(FakeListChatModel):
+        def _call(self, *a, **k):
+            raise AssertionError("no LLM call expected")
+
+    llm = NoCalls(responses=["x"])
+    plan = QueryPlanner(llm, "simple").plan("q", QueryTranslator(), {"vectorstore": "text"}, MetadataCatalog())
+    assert plan.queries == ["q"] and plan.datasources == ["vectorstore"] and not plan.planned

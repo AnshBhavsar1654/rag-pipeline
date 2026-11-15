@@ -32,6 +32,12 @@ class QueryTranslator:
         """Merge the ranked lists returned for each query into one ranking."""
         return reciprocal_rank_fusion(results, k=self._rrf_k)
 
+    def from_plan(self, question: str, generated: list[str]) -> list[str]:
+        """Queries to search with when the query planner wrote *generated* for us."""
+        if type(self) is QueryTranslator:
+            return [question]
+        return dedupe_queries([question, *generated])
+
 
 class LLMQueryTranslator(QueryTranslator):
     """A translator whose extra queries come from one LLM prompt."""

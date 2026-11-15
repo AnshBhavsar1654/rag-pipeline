@@ -7,7 +7,10 @@ vector store, retrieval strategies, re-ranking, and generation.
 
 from __future__ import annotations
 
-from collections.abc import Generator, Iterator
+import time
+from collections import OrderedDict
+from collections.abc import Callable, Generator, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -57,6 +60,7 @@ from src.query_construction.self_query import (
 )
 from src.query_construction.text_to_cypher import TextToCypher
 from src.query_construction.text_to_sql import TextToSQL
+from src.pipeline.planner import Plan, QueryPlanner
 from src.generation.generator import (
     SOURCES_HEADER,
     create_llm,
@@ -84,6 +88,24 @@ class Event:
     data: dict = field(default_factory=dict)
     answer: str = ""
     documents: list[Document] = field(default_factory=list)
+
+
+class _Clock:
+    def __init__(self):
+        self._last = time.perf_counter()
+
+    def lap(self) -> int:
+        """Milliseconds since the previous lap."""
+        now = time.perf_counter()
+        ms, self._last = int((now - self._last) * 1000), now
+        return ms
+
+
+def _timed(fn: Callable, *args):
+    """Call *fn* and return (result, elapsed milliseconds)."""
+    start = time.perf_counter()
+    result = fn(*args)
+    return result, int((time.perf_counter() - start) * 1000)
 
 
 def _drain(steps: Generator):
@@ -127,6 +149,8 @@ class RAGPipeline:
         self._relevance_grader: RelevanceGrader | None = None
         self._query_rewriter: QueryRewriter | None = None
         self._answer_grader: AnswerGrader | None = None
+        self._planner: QueryPlanner | None = None
+        self._plan_cache: OrderedDict = OrderedDict()
 
     @classmethod
     def from_config(cls, config_path: str | None = None) -> "RAGPipeline":
@@ -476,6 +500,56 @@ class RAGPipeline:
             yield self._step("query_translation", f"Rewrote follow-up as: {search_query}")
         return search_query
 
+    def _num_queries(self) -> int:
+        r = self.config.retrieval
+        return {"multi_query": r.multi_query.num_queries, "rag_fusion": r.rag_fusion.num_queries}.get(
+            r.strategy, 3)
+
+    def _semantic_route(self, question: str) -> tuple[str, str, float]:
+        cfg = self.config.routing
+        if not cfg.semantic or not cfg.prompts:
+            return "", "", 0.0
+        if self._semantic_router is None:
+            self._semantic_router = SemanticRouter(self.embeddings, {
+                name: (r.description, r.prompt) for name, r in cfg.prompts.items()
+            })
+        return self._semantic_router.route(question)
+
+    def _plan(self, search_query: str, available: dict[str, str]) -> Plan:
+        """Query translation + logical routing + self-query: one LLM call, or one each."""
+        cfg = self.config
+        use_filter = cfg.query_construction.self_query
+        routes = available if cfg.routing.logical else {VECTORSTORE: available[VECTORSTORE]}
+
+        if cfg.retrieval.planner:
+            key = (search_query, tuple(available))
+            if key in self._plan_cache:
+                self._plan_cache.move_to_end(key)
+                return self._plan_cache[key]
+            if self._planner is None:
+                self._planner = QueryPlanner(self.llm, cfg.retrieval.strategy, self._num_queries())
+            plan = self._planner.plan(search_query, self._translator, routes, self._catalog, use_filter)
+            self._plan_cache[key] = plan
+            if len(self._plan_cache) > 128:
+                self._plan_cache.popitem(last=False)
+        else:
+            queries = self._translator.translate(search_query)
+            if len(routes) > 1:
+                if self._router is None:
+                    self._router = LogicalRouter(self.llm)
+                datasources = self._router.route(search_query, routes)
+            else:
+                datasources = list(routes)
+            metadata_filter = (
+                SelfQueryConstructor(self.llm).construct(search_query, self._catalog)
+                if use_filter and self._catalog.filterable else MetadataFilter()
+            )
+            plan = Plan(queries, datasources, metadata_filter)
+
+        if not cfg.routing.logical:
+            plan = Plan(plan.queries, list(available), plan.metadata_filter, plan.planned)
+        return plan
+
     def _retrieve(self, search_query: str) -> Iterator[Event]:
         """Translation → routing → query construction → stores → ranking → CRAG.
 
@@ -484,99 +558,101 @@ class RAGPipeline:
         if self._base_retriever is None:
             raise RuntimeError("Pipeline not loaded. Call .load() or .ingest() first.")
         cfg = self.config
-
-        # 1. Query translation
-        queries = self._translator.translate(search_query)
-        noun = "query" if len(queries) == 1 else "queries"
-        yield self._step(
-            "query_translation",
-            f"{self._translator.name}: searching with {len(queries)} {noun}",
-            queries=queries,
-        )
-
-        # 2. Routing
         available = self.available_sources()
-        if cfg.routing.logical and len(available) > 1:
-            if self._router is None:
-                self._router = LogicalRouter(self.llm)
-            datasources = self._router.route(search_query, available)
-        else:
-            datasources = list(available)
-        yield self._step("routing", f"Logical routing → {', '.join(datasources)}", datasources=datasources)
 
-        prompt_name, route_prompt = "", ""
-        if cfg.routing.semantic and cfg.routing.prompts:
-            if self._semantic_router is None:
-                self._semantic_router = SemanticRouter(self.embeddings, {
-                    name: (r.description, r.prompt) for name, r in cfg.routing.prompts.items()
-                })
-            prompt_name, route_prompt, score = self._semantic_router.route(search_query)
-            yield self._step(
-                "routing",
-                f"Semantic routing → {prompt_name} prompt (similarity {score:.2f})",
-                prompt=prompt_name,
-            )
+        # 1-2. Query translation + routing (+ the self-query filter), with the
+        # semantic-routing embedding computed while the planner call is out.
+        clock = _Clock()
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            semantic = pool.submit(self._semantic_route, search_query)
+            plan = self._plan(search_query, available)
+            prompt_name, route_prompt, score = semantic.result()
+        planning_ms = clock.lap()
+        how = "one planner call" if plan.planned and cfg.retrieval.planner else "no LLM call needed"
+        if not cfg.retrieval.planner:
+            how = "separate calls"
+        noun = "query" if len(plan.queries) == 1 else "queries"
+        yield self._step("query_translation",
+                         f"{self._translator.name}: {len(plan.queries)} {noun} ({how})",
+                         queries=plan.queries, ms=planning_ms)
+        yield self._step("routing", f"Logical routing → {', '.join(plan.datasources)}",
+                         datasources=plan.datasources)
+        if prompt_name:
+            yield self._step("routing", f"Semantic routing → {prompt_name} prompt (similarity {score:.2f})",
+                             prompt=prompt_name)
 
-        # 3. Query construction, one per routed data store
+        # 3. Query construction + store lookups, all stores in parallel
         structured: list[Document] = []
-        if RELATIONAL_DB in datasources:
-            sql, docs = TextToSQL(self.llm, self.relational, cfg.relational_db.max_rows).run(search_query)
-            yield self._step(
-                "query_construction",
-                f"Text-to-SQL: {sql}" if docs else "Text-to-SQL found no answer in the tables",
-                sql=sql, store=RELATIONAL_DB,
-            )
-            structured += docs
-        if GRAPH_DB in datasources:
-            cypher, docs = TextToCypher(self.llm, self.graph, cfg.graph_db.max_results).run(search_query)
-            if docs:
-                message = f"Text-to-Cypher: {cypher}" if cypher else "Graph DB: facts around the entities mentioned"
-            else:
-                message = "Text-to-Cypher found nothing in the graph"
-            yield self._step("query_construction", message, cypher=cypher, store=GRAPH_DB)
-            structured += docs
-
         passages: list[Document] = []
-        if VECTORSTORE in datasources or not structured:
-            metadata_filter = MetadataFilter()
-            if cfg.query_construction.self_query and self._catalog.filterable:
-                metadata_filter = SelfQueryConstructor(self.llm).construct(search_query, self._catalog)
-                yield self._step(
+        steps: list[Event] = []
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            jobs = {}
+            if RELATIONAL_DB in plan.datasources:
+                jobs[RELATIONAL_DB] = pool.submit(_timed, TextToSQL(
+                    self.llm, self.relational, cfg.relational_db.max_rows).run, search_query)
+            if GRAPH_DB in plan.datasources:
+                jobs[GRAPH_DB] = pool.submit(_timed, TextToCypher(
+                    self.llm, self.graph, cfg.graph_db.max_results).run, search_query)
+            if VECTORSTORE in plan.datasources:
+                jobs[VECTORSTORE] = pool.submit(_timed, self._search, plan.queries, plan.metadata_filter)
+
+            if RELATIONAL_DB in jobs:
+                (sql, docs), ms = jobs[RELATIONAL_DB].result()
+                structured += docs
+                steps.append(self._step(
                     "query_construction",
-                    f"Self-query filter: {metadata_filter.describe()}" if metadata_filter
-                    else "Self-query: no metadata filter needed",
-                    store=VECTORSTORE,
-                )
-            passages = self._search(queries, metadata_filter)
-            yield self._step("query_construction", f"Vectorstore: {len(passages)} candidate passage(s)",
-                             store=VECTORSTORE)
+                    f"Text-to-SQL: {sql}" if docs else "Text-to-SQL found no answer in the tables",
+                    sql=sql, store=RELATIONAL_DB, ms=ms))
+            if GRAPH_DB in jobs:
+                (cypher, docs), ms = jobs[GRAPH_DB].result()
+                structured += docs
+                if docs:
+                    message = f"Text-to-Cypher: {cypher}" if cypher else "Graph DB: facts around the entities mentioned"
+                else:
+                    message = "Text-to-Cypher found nothing in the graph"
+                steps.append(self._step("query_construction", message, cypher=cypher, store=GRAPH_DB, ms=ms))
+            if VECTORSTORE in jobs:
+                passages, ms = jobs[VECTORSTORE].result()
+        for step in steps:
+            yield step
+        if VECTORSTORE not in jobs and not structured:
+            # The routed stores had nothing: fall back to the vectorstore.
+            passages, ms = _timed(self._search, plan.queries, plan.metadata_filter)
+        if VECTORSTORE in jobs or not structured:
+            label = f"Self-query filter: {plan.metadata_filter.describe()} · " if plan.metadata_filter else ""
+            yield self._step("query_construction", f"{label}Vectorstore: {len(passages)} candidate passage(s)",
+                             store=VECTORSTORE, ms=ms)
 
         # 4. Retrieval: ranking
-        passages = self._rank(search_query, passages)
+        clock.lap()
+        passages = self._rerank(search_query, passages)
         if self._reranker is not None and self._reranker.enabled and passages:
-            yield self._step("retrieval", f"Re-ranked with {cfg.reranking.provider} → kept the best {len(passages)}")
-        documents = structured + passages
+            yield self._step("retrieval", f"Re-ranked with {cfg.reranking.provider} → best {len(passages)}",
+                             ms=clock.lap())
 
         # 5. Retrieval: refinement and active retrieval (CRAG)
         crag = cfg.retrieval.crag
-        if crag.enabled and documents:
-            verdicts = self._grader().grade(search_query, documents)
-            relevant = [d for d, ok in zip(documents, verdicts) if ok]
-            yield self._step("retrieval", f"CRAG: {len(relevant)}/{len(documents)} document(s) relevant")
-            if len(relevant) < crag.min_relevant:
+        if crag.enabled and (structured or passages):
+            total = len(structured) + len(passages)
+            graded = {doc_key(d) for d in passages}
+            structured, passages = self._grade(search_query, structured, passages)
+            relevant = len(structured) + len(passages)
+            yield self._step("retrieval", f"CRAG: {relevant}/{total} relevant ({self._grading_mode()})",
+                             ms=clock.lap())
+            if relevant < crag.min_relevant:
                 new_query = self._rewriter().rewrite(search_query)
                 where = "the vectorstore" + (" and the web" if crag.web_search else "")
                 yield self._step("retrieval", f"CRAG active retrieval: searching {where} for: {new_query}")
-                seen = {doc_key(d) for d in documents}
-                extra = [d for d in self._rank(new_query, self._search([new_query])) if doc_key(d) not in seen]
+                extra = [d for d in self._search([new_query]) if doc_key(d) not in graded]
                 if crag.web_search:
                     extra += web_search(new_query, crag.web_results)
-                verdicts = self._grader().grade(search_query, extra)
-                found = [d for d, ok in zip(extra, verdicts) if ok]
-                yield self._step("retrieval", f"CRAG: {len(found)}/{len(extra)} new document(s) relevant")
-                relevant += found
-            documents = relevant
+                extra = self._rerank(search_query, extra)
+                _, found = self._grade(search_query, [], extra)
+                yield self._step("retrieval", f"CRAG: {len(found)}/{len(extra)} new document(s) relevant",
+                                 ms=clock.lap())
+                passages += found
 
+        documents = structured + self._expand(passages)
         yield self._step("retrieval", f"{len(documents)} document(s) passed to the LLM")
         return Retrieval(search_query, documents, prompt_name, route_prompt)
 
@@ -588,15 +664,45 @@ class RAGPipeline:
             results = [self._base_retriever.invoke(q) for q in queries]
         return self._translator.fuse(results)
 
-    def _rank(self, query: str, passages: list[Document]) -> list[Document]:
-        """Re-rank (or cap) the candidates, then swap retrieval units for their parents."""
+    def _rerank(self, query: str, passages: list[Document]) -> list[Document]:
+        """Re-rank (or cap) the candidates; scores land in ``relevance_score``."""
         if self._reranker is not None and self._reranker.enabled and passages:
-            passages = self._reranker.rerank(query, passages[: self.config.reranking.candidates])
-        else:
-            passages = passages[: self.config.retrieval.top_k]
+            return self._reranker.rerank(query, passages[: self.config.reranking.candidates])
+        return passages[: self.config.retrieval.top_k]
+
+    def _expand(self, passages: list[Document]) -> list[Document]:
+        """Swap retrieval units for their parent documents (multi-representation)."""
         if self.config.indexing.multi_representation != "none":
-            passages = expand_to_parents(passages, self.docstore)
+            return expand_to_parents(passages, self.docstore)
         return passages
+
+    def _rank(self, query: str, passages: list[Document]) -> list[Document]:
+        return self._expand(self._rerank(query, passages))
+
+    def _grading_mode(self) -> str:
+        crag = self.config.retrieval.crag
+        if crag.grader == "reranker" and self._reranker is not None and self._reranker.scores_relevance:
+            return "re-ranker scores"
+        return "LLM grader"
+
+    def _grade(
+        self, query: str, structured: list[Document], passages: list[Document],
+    ) -> tuple[list[Document], list[Document]]:
+        """CRAG refinement: keep only the relevant documents.
+
+        With a cross-encoder re-ranker its scores already measure relevance,
+        so passages are graded by threshold with no LLM call (the CRAG paper's
+        evaluator is a small model too). Otherwise the LLM grades everything.
+        """
+        crag = self.config.retrieval.crag
+        if self._grading_mode() == "re-ranker scores":
+            kept = [p for p in passages
+                    if p.metadata.get("relevance_score", crag.min_score) >= crag.min_score]
+            return structured, kept
+        expanded = self._expand(passages)
+        verdicts = self._grader().grade(query, structured + expanded)
+        keep = [d for d, ok in zip(structured + expanded, verdicts) if ok]
+        return [d for d in keep if d in structured], [d for d in keep if d not in structured]
 
     def _grader(self) -> RelevanceGrader:
         if self._relevance_grader is None:
