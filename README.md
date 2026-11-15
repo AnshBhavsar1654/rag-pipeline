@@ -83,10 +83,16 @@ a file's previous data instead of duplicating it.
 python app.py                  # then open http://localhost:7860
 ```
 
-Upload files from the sidebar. Each answer shows a colour-coded pipeline trace:
-translation, routing, the SQL / Cypher / filter that was built, re-ranking, CRAG
-grading and the Self-RAG verdict. Citations like `[1]` jump to their source.
-If there is no index yet, the app builds one from the configured sources on startup.
+Add files from the sidebar or drop them anywhere on the page. A file is
+searchable within seconds to a couple of minutes, while graph extraction and
+RAPTOR summaries finish in the background with a progress bar. Under each
+question a coloured bar shows the five stages (translate, route, construct,
+retrieve, answer), each sized by the time it took; click it for the
+step-by-step trace with the SQL, Cypher or filter that was built. Citations
+like `[1]` jump to their source passage, Stop cancels an answer, and errors
+such as used-up API quotas are explained in plain words instead of raw API
+messages. Add `?q=your+question` to the URL to ask on load. If there is no
+index yet, the app builds one from the configured sources on startup.
 
 **Terminal:**
 
@@ -139,6 +145,7 @@ its own.
 retrieval:
   strategy: "rag_fusion"   # simple | multi_query | rag_fusion | hyde | step_back | decomposition
   top_k: 5
+  planner: true            # one LLM call plans translation + routing + self-query filter
   hybrid:
     enabled: true          # dense + BM25 keyword search
 ```
@@ -156,8 +163,11 @@ query_construction:
   self_query: true
 ```
 
-Logical routing and self-query skip their LLM call when there is nothing to
-choose between (only the vectorstore has data, or the index holds a single file).
+With `retrieval.planner: true` (the default) query translation, logical
+routing and the self-query filter come from **one** LLM call; they still
+appear as separate steps in the trace. No call is made at all when there is
+nothing to decide (simple strategy, one store, nothing to filter). Set
+`planner: false` to give each stage its own call.
 
 ### Data stores
 
@@ -167,9 +177,9 @@ relational_db:
   path: "./data/relational.sqlite"
 
 graph_db:
-  enabled: true                 # one LLM call per batch of chunks while indexing
+  enabled: true                 # extracted in the background after a file is searchable
   path: "./data/graph.json"
-  extraction_batch_size: 3
+  extraction_batch_chars: 12000 # text per extraction call
 ```
 
 ### Indexing
@@ -179,13 +189,15 @@ chunking:
   chunk_size: 400               # tokens; keep under the embedding model's input limit
   chunk_overlap: 60
   method: "semantic"            # semantic | recursive
+  semantic_boundaries: "lexical" # lexical (TF-IDF, near instant) | embedding (sharper, slow on CPU)
 
 indexing:
   multi_representation: "parent_document"   # none | parent_document | summary
   parent_chunk_size: 1000
+  llm_concurrency: 4            # LLM calls at once during background enrichment
   raptor:
-    enabled: true               # per file; one LLM call per cluster of chunks
-    cluster_size: 6
+    enabled: true               # per file, in the background; one LLM call per cluster
+    cluster_size: 10
     max_levels: 3
 
 embedding:
@@ -207,6 +219,8 @@ reranking:
 retrieval:
   crag:
     enabled: true               # grade documents, drop irrelevant ones
+    grader: "reranker"          # reranker (cross-encoder score, no LLM call) | llm
+    min_score: -6.0             # cross-encoder score that counts as relevant
     min_relevant: 1             # fewer relevant than this → rewrite + search again
     web_search: true            # DuckDuckGo, no API key
 ```
@@ -226,19 +240,41 @@ llm:
   provider: "google"            # google | groq | openai | ollama
   model: "gemini-3.6-flash"
   max_retries: 3
-  fallback:                     # used when the primary model errors
+  failover_cooldown_seconds: 60 # minimum pause for a rate-limited model
+  fallback:                     # used the moment the primary errors
     provider: "groq"
     model: "openai/gpt-oss-120b"
 ```
 
-### LLM call budget
+With a fallback configured, a rate-limited or failing primary hands the call to
+the fallback immediately (no retry wait) and is skipped until the provider's
+own retry time has passed, which for a used-up daily quota can be hours. The
+sidebar shows which model is paused and why.
 
-With everything on, a question costs roughly: follow-up rewrite (only with
-history) + query translation + logical routing (only with several stores) +
-one construction call per routed store + CRAG grading + the answer + the
-Self-RAG check, so 5 to 8 calls. Free-tier quotas are tight (Gemini Flash
-allows about 5 requests per minute), so keep the fallback configured. For a
-lighter setup, use `strategy: "simple"` and turn off `crag` and `self_rag`.
+### Latency and the LLM call budget
+
+A question costs **2 to 4 LLM calls**: the planner (translation, routing and
+the filter in one call), Text-to-SQL / Text-to-Cypher only when the router picks
+those stores (run in parallel with the vector search), the answer, and the
+Self-RAG check after the answer has already streamed. CRAG grades relevance
+with the cross-encoder scores re-ranking already produced, so it costs no
+call unless it has to search again. Follow-ups add one call to rewrite the
+question. The coloured bar under each answer shows how long each stage took.
+
+Free-tier quotas are tight (Gemini's free tier allows 20 requests a day per
+model, Groq limits tokens per minute), so keep the fallback configured. For
+the lightest setup use `strategy: "simple"` and turn off `self_rag`.
+
+### Indexing speed
+
+Uploading makes a file searchable as soon as it is loaded, chunked and
+embedded; graph extraction and RAPTOR summaries then run in the background
+with progress in the sidebar, and you can ask questions meanwhile. On a
+346-page PDF on a laptop CPU the searchable phase went from about 4 minutes
+plus roughly 50 minutes of blocking LLM calls to under 2 minutes, and the
+background enrichment makes about a tenth as many LLM calls as before.
+Embedding is the remaining floor on CPU; a GPU, or `embedding.provider:
+"google"`, makes it much faster.
 
 ---
 
