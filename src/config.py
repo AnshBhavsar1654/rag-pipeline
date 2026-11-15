@@ -94,6 +94,8 @@ class LLMConfig(BaseModel):
     base_url: Optional[str] = None
     # Optional second model used when the primary errors (outage, rate limit).
     fallback: Optional[LLMConfig] = None
+    # After a rate limit or outage, skip the failing model for this long.
+    failover_cooldown_seconds: float = 60
 
 
 class MultiQueryConfig(BaseModel):

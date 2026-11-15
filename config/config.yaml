@@ -77,7 +77,10 @@ llm:
   model: "gemini-3.6-flash"  # Model name
   temperature: 0.1
   max_tokens: 2048
-  max_retries: 3             # Retry transient API errors (rate limits, 503s)
+  max_retries: 3             # Retries for the last model in the chain
+  # With a fallback, a rate-limited or failing primary hands the call to the
+  # fallback at once (no retries) and is skipped for failover_cooldown_seconds.
+  failover_cooldown_seconds: 60
   # Used automatically when the primary model errors (e.g. 503 overloaded).
   # Remove this block to disable. Needs that provider's API key in .env.
   fallback:

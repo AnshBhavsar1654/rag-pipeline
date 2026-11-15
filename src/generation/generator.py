@@ -15,14 +15,37 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 
 from src.config import LLMConfig
+from src.generation.failover import FailoverChatModel
 
 
 def create_llm(config: LLMConfig) -> BaseChatModel:
-    """Create an LLM instance based on configuration.
+    """Create the chat model described by *config*.
 
-    With ``config.fallback`` set, returns a runnable that retries a failed
-    call on the fallback model (still usable anywhere a chat model is).
+    With ``config.fallback`` set, returns a FailoverChatModel: the primary
+    gets no retries of its own, so a rate limit or outage moves the call to
+    the fallback immediately, and the primary cools down before it is tried
+    again.
     """
+    if config.fallback is None:
+        return _create_single(config, config.max_retries)
+
+    chain: list[LLMConfig] = []
+    node: LLMConfig | None = config
+    while node is not None:
+        chain.append(node)
+        node = node.fallback
+    models = [
+        _create_single(c, 0 if i < len(chain) - 1 else c.max_retries)
+        for i, c in enumerate(chain)
+    ]
+    return FailoverChatModel(
+        models=models,
+        names=[f"{c.provider}:{c.model}" for c in chain],
+        cooldown_seconds=config.failover_cooldown_seconds,
+    )
+
+
+def _create_single(config: LLMConfig, retries: int) -> BaseChatModel:
 
     if config.provider == "openai":
         from langchain_openai import ChatOpenAI
@@ -30,7 +53,7 @@ def create_llm(config: LLMConfig) -> BaseChatModel:
             model=config.model,
             temperature=config.temperature,
             max_tokens=config.max_tokens,
-            max_retries=config.max_retries,
+            max_retries=retries,
             **({"base_url": config.base_url} if config.base_url else {}),
         )
         print(f"[LLM] LLM: OpenAI ({config.model})")
@@ -41,7 +64,7 @@ def create_llm(config: LLMConfig) -> BaseChatModel:
             model=config.model,
             temperature=config.temperature,
             max_tokens=config.max_tokens,
-            max_retries=config.max_retries,
+            max_retries=retries,
         )
         print(f"[LLM] LLM: Groq ({config.model})")
 
@@ -51,7 +74,7 @@ def create_llm(config: LLMConfig) -> BaseChatModel:
             model=config.model,
             temperature=config.temperature,
             max_output_tokens=config.max_tokens,
-            max_retries=config.max_retries,
+            max_retries=retries,
         )
         print(f"[LLM] LLM: Google ({config.model})")
 
@@ -70,8 +93,6 @@ def create_llm(config: LLMConfig) -> BaseChatModel:
     else:
         raise ValueError(f"Unsupported LLM provider: {config.provider}")
 
-    if config.fallback is not None:
-        return llm.with_fallbacks([create_llm(config.fallback)])
     return llm
 
 
