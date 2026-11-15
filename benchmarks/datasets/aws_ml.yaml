@@ -1,0 +1,53 @@
+# Questions over the Amazon Machine Learning Developer Guide (a 202-page PDF).
+# The PDF is not in the repo; the benchmark skips this set when it is missing.
+# Facts were taken from the guide's text (training parameters, system limits).
+name: aws_ml
+description: Amazon ML Developer Guide PDF, 202 pages (data/uploads/machinelearning-aws.pdf)
+corpus:
+  - data/uploads/machinelearning-aws.pdf
+questions:
+  - question: How many passes over the data does Amazon ML make by default?
+    evidence: ["makes 10 passes"]
+    answer: [["10", "ten"]]
+  - question: Up to how many passes over the training data can you set?
+    evidence: ["setting a number up to"]
+    answer: [["100"]]
+  - question: What is the default maximum ML model size?
+    evidence: ["100,000,000"]
+    answer: [["100"]]
+  - question: What is the default shuffle type for training data?
+    evidence: ["sgd.shuffletype"]
+    answer: [["auto"]]
+  - question: What is the maximum size of each observation?
+    evidence: ["size of each observations"]
+    answer: [["100 kb", "100kb"]]
+  - question: How large can the training data be?
+    evidence: ["size of training data"]
+    answer: [["100 gb", "100gb"]]
+  - question: How many jobs can run simultaneously per account?
+    evidence: ["number of simultaneous jobs"]
+    answer: [["25"]]
+  - question: What is the longest a job can run before it is terminated?
+    evidence: ["longest run time for any job"]
+    answer: [["7 days", "seven days"]]
+  - question: How does the Amazon ML console split data between training and evaluation?
+    evidence: ["70 percent"]
+    answer: [["70"], ["30"]]
+  - question: What is the default score threshold for binary classification?
+    evidence: ["set by default to be 0.5"]
+    answer: [["0.5"]]
+  - question: What effect does L1 regularization have on a model?
+    evidence: ["l1 regularization reduces the number of features"]
+    answer: [["sparse", "zero", "fewer features", "number of features"]]
+  - question: What is the TPS limit for each real-time prediction endpoint?
+    evidence: ["tps for each real-time prediction endpoint"]
+    answer: [["200"]]
+  - question: How long can an Amazon ML ID string be?
+    evidence: ["up to 64"]
+    answer: [["64"]]
+  - question: What does an n-gram transformation with window size 2 produce?
+    evidence: ["window size =2", "two-word"]
+    answer: [["two-word", "two word", "pairs", "bigram"]]
+  - question: How long are Amazon ML objects available after you create them?
+    evidence: ["at least two years"]
+    answer: [["two years", "2 years"]]

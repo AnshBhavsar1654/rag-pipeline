@@ -1,0 +1,48 @@
+# Questions over sample_docs/ (in the repo, so anyone can reproduce the numbers).
+#
+# evidence: a passage counts as relevant when it contains ANY of these
+#           strings (compared case-insensitively, whitespace collapsed).
+# answer:   for --llm runs; every group must match, a group matches when the
+#           answer contains any of its strings.
+name: sample
+description: The two sample documents (an LLM overview and a table of models)
+corpus:
+  - sample_docs/llm_overview.md
+  - sample_docs/llm_models.csv
+questions:
+  - question: Which paper introduced the transformer architecture?
+    evidence: ["attention is all you need"]
+    answer: [["attention is all you need"]]
+  - question: What are the stages of training a large language model?
+    evidence: ["pre-training", "rlhf"]
+    answer: [["pre-training", "pretraining"], ["fine-tuning", "fine tuning"]]
+  - question: What does RLHF stand for?
+    evidence: ["reinforcement learning from human feedback"]
+    answer: [["reinforcement learning from human feedback"]]
+  - question: What are the benefits of retrieval-augmented generation?
+    evidence: ["benefits of rag"]
+    answer: [["hallucination"], ["up-to-date", "current"]]
+  - question: What is positional encoding used for in transformers?
+    evidence: ["positional encoding"]
+    answer: [["position", "order"]]
+  - question: Name some prompt engineering techniques.
+    evidence: ["chain-of-thought", "few-shot prompting"]
+    answer: [["few-shot", "chain-of-thought", "zero-shot"]]
+  - question: What challenges do LLMs face?
+    evidence: ["hallucination**: generating plausible"]
+    answer: [["hallucination"], ["bias"]]
+  - question: What future directions are expected for LLMs?
+    evidence: ["multimodal models"]
+    answer: [["multimodal"]]
+  - question: How many parameters does PaLM have?
+    evidence: ["palm"]
+    answer: [["540"]]
+  - question: Which company developed Falcon 180B?
+    evidence: ["falcon 180b"]
+    answer: [["technology innovation institute"]]
+  - question: What is the context window of Mistral 7B?
+    evidence: ["mistral 7b"]
+    answer: [["8192", "8,192", "8k"]]
+  - question: Which models in the table were released in 2022?
+    evidence: ["release_year: 2022", "| 2022 |"]
+    answer: [["palm"], ["bloom"]]
