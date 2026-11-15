@@ -51,15 +51,26 @@ class HybridRetriever:
     def uses_bm25(self) -> bool:
         return self._bm25 is not None
 
-    def _keyword_search(self, query: str) -> list[Document]:
+    @property
+    def documents(self) -> list[Document]:
+        return self._documents
+
+    def _keyword_search(self, query: str, metadata_filter=None) -> list[Document]:
         scores = self._bm25.get_scores(tokenize(query))
         ranked = sorted(range(len(scores)), key=scores.__getitem__, reverse=True)
-        return [self._documents[i] for i in ranked[: self._fetch_k] if scores[i] > 0]
+        hits = [
+            self._documents[i] for i in ranked
+            if scores[i] > 0
+            and (not metadata_filter or metadata_filter.matches(self._documents[i].metadata))
+        ]
+        return hits[: self._fetch_k]
 
-    def invoke(self, query: str) -> list[Document]:
+    def invoke(self, query: str, metadata_filter=None) -> list[Document]:
+        """Search; *metadata_filter* (a self-query MetadataFilter) narrows both halves."""
+        where = metadata_filter.to_chroma() if metadata_filter else None
         if self._bm25 is None:
-            return self._vectorstore.similarity_search(query, k=self._k)
+            return self._vectorstore.similarity_search(query, k=self._k, filter=where)
 
-        dense = self._vectorstore.similarity_search(query, k=self._fetch_k)
-        sparse = self._keyword_search(query)
+        dense = self._vectorstore.similarity_search(query, k=self._fetch_k, filter=where)
+        sparse = self._keyword_search(query, metadata_filter)
         return reciprocal_rank_fusion([dense, sparse], k=self._rrf_k)[: self._k]
