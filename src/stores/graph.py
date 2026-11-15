@@ -186,27 +186,30 @@ triples, each an object with keys "head", "head_type", "relation", "tail", \
 "tail_type". Use short canonical entity names (e.g. "GPT-4", "OpenAI"), \
 singular CamelCase types (e.g. Organization, Model, Concept, Person) and \
 UPPER_SNAKE_CASE relations (e.g. DEVELOPED_BY, PART_OF, USES). Only include \
-facts stated in the passages. Output ONLY the JSON array.
+facts stated in the passages, at most 25 of the most important ones. Output ONLY the JSON array.
 
 Passages:
 {passages}""")
 
 
 def parse_triples(text: str) -> list[dict]:
-    match = re.search(r"\[.*\]", text, re.S)
-    if not match:
-        return []
-    try:
-        data = json.loads(match.group(0))
-    except json.JSONDecodeError:
-        return []
-    return [t for t in data if isinstance(t, dict) and t.get("head") and t.get("tail")]
+    """Parse triples one object at a time, so a reply cut off at the token
+    limit still yields every complete triple before the cut."""
+    triples = []
+    for match in re.finditer(r"\{[^{}]*\}", text):
+        try:
+            item = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(item, dict) and item.get("head") and item.get("tail"):
+            triples.append(item)
+    return triples
 
 
 class GraphExtractor:
     """Batch chunks through an LLM to pull out entity-relationship triples."""
 
-    def __init__(self, llm: BaseChatModel, batch_size: int = 6):
+    def __init__(self, llm: BaseChatModel, batch_size: int = 3):
         self._chain = _EXTRACT_PROMPT | llm | StrOutputParser()
         self._batch_size = max(1, batch_size)
 

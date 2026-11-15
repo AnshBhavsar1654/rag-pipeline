@@ -120,6 +120,12 @@ def test_raptor_builds_levels_until_one_summary():
 
     leaves = [Document(page_content=f"passage {i}") for i in range(10)]
     llm = FakeListChatModel(responses=["summary"])
-    summaries = RaptorBuilder(llm, DeterministicFakeEmbedding(size=8), cluster_size=4).build(leaves)
+    summaries = RaptorBuilder(llm, DeterministicFakeEmbedding(size=8), cluster_size=4).build(leaves, source="a.md")
+    assert {d.metadata["source"] for d in summaries} == {"a.md"}
     levels = [d.metadata["raptor_level"] for d in summaries]
     assert levels[0] == 1 and levels[-1] == max(levels) and levels.count(max(levels)) == 1
+
+
+def test_triples_survive_a_reply_cut_off_mid_json():
+    cut = TRIPLES[: TRIPLES.rindex('"tail"')]  # second triple truncated
+    assert [t["tail"] for t in parse_triples(cut)] == ["OpenAI"]

@@ -145,11 +145,10 @@ def build_representations(
         parent.metadata.pop("chunk_index", None)
         parents.setdefault(parent_id(parent), parent)
 
-    units: list[Document] = []
+    # parent_id rides along in the metadata every child chunk inherits.
     for pid, parent in parents.items():
-        for child in split_children([parent]):
-            child.metadata["parent_id"] = pid
-            units.append(child)
+        parent.metadata["parent_id"] = pid
+    units = split_children(list(parents.values()))
 
     if mode == "summary" and summarizer is not None:
         items = list(parents.items())

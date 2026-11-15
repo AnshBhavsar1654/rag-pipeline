@@ -68,7 +68,7 @@ relational_db:
 graph_db:
   enabled: true
   path: "./data/graph.json"
-  extraction_batch_size: 6   # Chunks per extraction call
+  extraction_batch_size: 3   # Parent chunks per extraction call
   max_results: 50
 
 # --- LLM ---

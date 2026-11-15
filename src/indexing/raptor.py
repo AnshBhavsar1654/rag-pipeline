@@ -1,11 +1,14 @@
 """
 Indexing — Hierarchical indexing (RAPTOR)
 
-Builds a tree of summaries on top of the chunks: cluster the chunk
-embeddings, have the LLM summarize each cluster, then cluster and summarize
-those summaries again, level by level. All summaries are added to the
-vectorstore next to the chunks, so a question can match detail (a chunk) or
-a theme spanning many chunks (a higher-level summary).
+Builds a tree of summaries on top of each document's chunks: cluster the
+chunk embeddings, have the LLM summarize each cluster, then cluster and
+summarize those summaries again, level by level. All summaries are added to
+the vectorstore next to the chunks, so a question can match detail (a chunk)
+or a theme spanning many chunks (a higher-level summary).
+
+Trees are built per source file, so indexing a file only summarizes that
+file, and its summaries are replaced together with its chunks.
 """
 
 from __future__ import annotations
@@ -21,7 +24,6 @@ from langchain_core.prompts import ChatPromptTemplate
 
 
 RAPTOR_TYPE = "raptor_summary"
-RAPTOR_SOURCE = "RAPTOR summary tree"
 
 _CLUSTER_PROMPT = ChatPromptTemplate.from_template("""\
 Here are related passages from a set of documents. Write a detailed summary \
@@ -71,8 +73,13 @@ class RaptorBuilder:
         self._max_levels = max_levels
         self._max_chars = max_chars
 
-    def build(self, leaves: list[Document], vectors: list[list[float]] | None = None) -> list[Document]:
-        """Return the summary nodes of every level above *leaves*."""
+    def build(
+        self,
+        leaves: list[Document],
+        vectors: list[list[float]] | None = None,
+        source: str = "",
+    ) -> list[Document]:
+        """Return the summary nodes of every level above *leaves* (one source's chunks)."""
         if len(leaves) < 2:
             return []
         nodes = leaves
@@ -98,7 +105,7 @@ class RaptorBuilder:
                     level_nodes.append(Document(
                         page_content=summary,
                         metadata={
-                            "source": RAPTOR_SOURCE, "type": RAPTOR_TYPE,
+                            "source": source, "type": RAPTOR_TYPE,
                             "raptor_level": level, "cluster_size": len(members),
                         },
                     ))

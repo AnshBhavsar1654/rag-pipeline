@@ -81,7 +81,7 @@ class GraphDBConfig(BaseModel):
     """Knowledge graph built by LLM triple extraction (Text-to-Cypher target)."""
     enabled: bool = True
     path: str = "./data/graph.json"
-    extraction_batch_size: int = 6   # Chunks per extraction call
+    extraction_batch_size: int = 3   # Parent chunks per extraction call
     max_results: int = 50
 
 

@@ -308,8 +308,8 @@ class RAGPipeline:
         # Entities and relationships → graph DB (parents: fewer, fuller passages)
         self._index_graph(list(parents.values()) or units, sources, rebuild=rebuild)
 
-        # Hierarchical indexing: RAPTOR summary tree over everything indexed
-        self._build_raptor()
+        # Hierarchical indexing: a RAPTOR summary tree per indexed source
+        self._build_raptor(sources)
 
         self._init_retrieval()
         return written
@@ -329,26 +329,27 @@ class RAGPipeline:
             summarizer=summarizer,
         )
 
-    def _build_raptor(self) -> None:
-        """(Re)build the RAPTOR summary tree over every leaf chunk in the index."""
+    def _build_raptor(self, sources: set[str]) -> None:
+        """Build a RAPTOR summary tree over each newly indexed source's chunks."""
         cfg = self.config.indexing.raptor
         if not cfg.enabled or self._vectorstore is None:
             return
-        collection = self._vectorstore._collection
-        collection.delete(where={"type": RAPTOR_TYPE})
-        data = collection.get(include=["documents", "metadatas", "embeddings"])
-        leaves, vectors = [], []
-        for text, meta, vector in zip(data["documents"], data["metadatas"], data["embeddings"]):
-            if (meta or {}).get("type") not in (RAPTOR_TYPE, "summary"):
-                leaves.append(Document(page_content=text, metadata=meta or {}))
-                vectors.append(list(vector))
-        if len(leaves) < 2:
-            return
-        print(f"[RAPTOR] Building the summary tree over {len(leaves)} chunk(s)...")
         builder = RaptorBuilder(self.llm, self.embeddings, cfg.cluster_size, cfg.max_levels)
-        summaries = builder.build(leaves, vectors)
-        if summaries:
-            add_documents(self._vectorstore, summaries)
+        collection = self._vectorstore._collection
+        for source in sorted(sources):
+            # Old summaries of this source went with delete_sources(); read its leaves back.
+            data = collection.get(where={"source": source}, include=["documents", "metadatas", "embeddings"])
+            leaves, vectors = [], []
+            for text, meta, vector in zip(data["documents"], data["metadatas"], data["embeddings"]):
+                if (meta or {}).get("type") not in (RAPTOR_TYPE, "summary"):
+                    leaves.append(Document(page_content=text, metadata=meta or {}))
+                    vectors.append(list(vector))
+            if len(leaves) < 3:
+                continue
+            print(f"[RAPTOR] Building the summary tree for {Path(source).name} ({len(leaves)} chunks)...")
+            summaries = builder.build(leaves, vectors, source=source)
+            if summaries:
+                add_documents(self._vectorstore, summaries)
 
     def _index_tables(self, documents: list[Document], rebuild: bool = False) -> None:
         """Load every table in *documents* into the relational DB (for Text-to-SQL)."""
