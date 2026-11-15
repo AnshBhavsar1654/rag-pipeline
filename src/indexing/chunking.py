@@ -5,10 +5,13 @@ Two splitters:
 
 * ``recursive``: token-aware recursive splitting on paragraphs, lines and
   sentences up to ``chunk_size``.
-* ``semantic`` (Semantic Splitter): embeds every sentence and starts a new
-  chunk where the meaning shifts (the distance between neighbouring
-  sentences is in the top percentile), so chunks follow topics instead of
-  arbitrary lengths. Over-long topics are still capped at ``chunk_size``.
+* ``semantic`` (Semantic Splitter): starts a new chunk where the meaning
+  shifts (the distance between neighbouring sentences is in the top
+  percentile), so chunks follow topics instead of arbitrary lengths.
+  Over-long topics are still capped at ``chunk_size``. Sentences are
+  compared either by word statistics (``lexical``: TF-IDF, the TextTiling
+  approach, near-instant) or by the embedding model (``embedding``: a little
+  sharper, but it runs the model over the whole text a second time).
 
 Tables are never split semantically: a table is one unit of meaning.
 """
@@ -69,6 +72,36 @@ _MIN_UNIT_CHARS = 100
 
 def _join(sentences: list[str]) -> str:
     return "\n".join(sentences)
+
+
+_WORD = re.compile(r"[a-z0-9]{3,}")
+
+
+def lexical_vectors(per_doc: list[list[str]]) -> list[np.ndarray]:
+    """TF-IDF vectors for every sentence, one matrix per document.
+
+    Document frequencies are counted over all sentences, so a word common
+    everywhere ("the", the product name) does not register as a topic shift."""
+    tokenized = [[_WORD.findall(s.lower()) for s in sents] for sents in per_doc]
+    df: dict[str, int] = {}
+    n = 0
+    for doc in tokenized:
+        for words in doc:
+            n += 1
+            for w in set(words):
+                df[w] = df.get(w, 0) + 1
+    out = []
+    for doc in tokenized:
+        vocab = {w: i for i, w in enumerate(sorted({w for words in doc for w in words}))}
+        m = np.zeros((len(doc), max(len(vocab), 1)))
+        for row, words in enumerate(doc):
+            for w in words:
+                m[row, vocab[w]] += 1.0
+        if vocab:
+            idf = np.log((1 + n) / (1 + np.array([df[w] for w in vocab])))  # vocab is insertion-ordered
+            m *= idf
+        out.append(m)
+    return out
 
 
 def _smooth(vectors: np.ndarray) -> np.ndarray:
@@ -132,20 +165,22 @@ def split_documents(
         # instead of one per document.
         prose = [d for d in documents if d.metadata.get("type") != "table"]
         per_doc = [split_sentences(d.page_content) for d in prose]
-        flat = [s for sents in per_doc for s in sents]
-        # The opening of a sentence is enough to tell a topic shift, and
-        # truncating keeps long table rows / code lines from dominating cost.
-        probe = [s[:_BOUNDARY_CHARS] for s in flat]
-        vectors = np.array(embeddings.embed_documents(probe), dtype=float) if flat else np.zeros((0, 1))
+        if config.semantic_boundaries == "embedding":
+            flat = [s for sents in per_doc for s in sents]
+            # The opening of a sentence is enough to tell a topic shift, and
+            # truncating keeps long table rows / code lines from dominating cost.
+            probe = [s[:_BOUNDARY_CHARS] for s in flat]
+            vectors = np.array(embeddings.embed_documents(probe), dtype=float) if flat else np.zeros((0, 1))
+            offsets = np.cumsum([0] + [len(x) for x in per_doc])
+            matrices = [vectors[offsets[i]: offsets[i + 1]] for i in range(len(per_doc))]
+        else:
+            matrices = lexical_vectors(per_doc)
         length = splitter._length_function
-        offset = 0
-        for doc, sents in zip(prose, per_doc):
-            n = len(sents)
+        for doc, sents, matrix in zip(prose, per_doc, matrices):
             groups = semantic_groups(
-                sents, vectors[offset: offset + n], [length(x) for x in sents],
+                sents, matrix, [length(x) for x in sents],
                 config.chunk_size, config.semantic_breakpoint_percentile,
             )
-            offset += n
             pieces = [Document(page_content=g, metadata=dict(doc.metadata)) for g in groups]
             # A single over-long sentence is still capped at chunk_size.
             chunks.extend(splitter.split_documents(pieces))

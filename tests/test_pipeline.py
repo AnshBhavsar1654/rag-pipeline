@@ -297,3 +297,16 @@ def test_parent_documents_replace_child_chunks(config, embeddings):
 def test_full_width_citations_are_normalized():
     from src.generation.generator import normalize_citations
     assert normalize_citations("Mistral 7B【1】") == "Mistral 7B[1]"
+
+
+def test_lexical_semantic_splitter_cuts_at_the_topic_change():
+    from src.config import ChunkingConfig
+    from src.indexing.chunking import split_documents
+
+    bread = " ".join(f"Sourdough bread needs flour, water, salt and a lively starter, step {i}." for i in range(8))
+    orbit = " ".join(f"Satellites orbit Earth because gravity bends their path around the planet, fact {i}." for i in range(8))
+    doc = Document(page_content=f"{bread} {orbit}", metadata={"source": "mixed.txt"})
+    cfg = ChunkingConfig(chunk_size=400, chunk_overlap=0, method="semantic", semantic_boundaries="lexical")
+    chunks = split_documents([doc], cfg, embeddings=DeterministicFakeEmbedding(size=8))
+    assert len(chunks) == 2
+    assert "Satellites" not in chunks[0].page_content and "Sourdough" not in chunks[1].page_content

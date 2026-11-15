@@ -33,6 +33,9 @@ class ChunkingConfig(BaseModel):
     # "semantic" breaks chunks where the meaning shifts between sentences;
     # "recursive" splits on paragraphs/lines/sentences by length only.
     method: Literal["recursive", "semantic"] = "semantic"
+    # How the semantic splitter compares sentences: "lexical" (TF-IDF, near
+    # instant) or "embedding" (the embedding model; sharper, much slower).
+    semantic_boundaries: Literal["lexical", "embedding"] = "lexical"
     semantic_breakpoint_percentile: float = 90
 
 

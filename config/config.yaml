@@ -17,6 +17,7 @@ chunking:
   use_tiktoken: true        # Use tiktoken-aware splitting
   tiktoken_encoding: "cl100k_base"
   method: "semantic"        # semantic (break where meaning shifts) | recursive (by length)
+  semantic_boundaries: "lexical"   # lexical (TF-IDF, near instant) | embedding (sharper, slow on CPU)
   semantic_breakpoint_percentile: 90
 
 # --- Indexing ---
