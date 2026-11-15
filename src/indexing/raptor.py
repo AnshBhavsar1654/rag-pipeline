@@ -18,6 +18,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 from langchain_core.documents import Document
+
+from src.monitoring.meter import submit
 from langchain_core.embeddings import Embeddings
 from langchain_core.language_models import BaseChatModel
 from langchain_core.output_parsers import StrOutputParser
@@ -111,7 +113,8 @@ class RaptorBuilder:
             clusters = [m for m in ([nodes[i] for i in np.flatnonzero(labels == c)] for c in range(k)) if m]
             level_nodes: list[Document] = []
             with ThreadPoolExecutor(max_workers=self._max_workers) as pool:
-                for members, summary in zip(clusters, pool.map(self._summarize, clusters)):
+                futures = [submit(pool, self._summarize, c) for c in clusters]
+                for members, summary in zip(clusters, (f.result() for f in futures)):
                     done += 1
                     if progress:
                         progress(min(done, expected), expected)

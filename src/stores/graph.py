@@ -22,6 +22,8 @@ from pathlib import Path
 
 import networkx as nx
 from langchain_core.documents import Document
+
+from src.monitoring.meter import submit
 from langchain_core.language_models import BaseChatModel
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
@@ -263,7 +265,7 @@ class GraphExtractor:
         batches = self._batches(chunks)
         results = []
         with ThreadPoolExecutor(max_workers=self._max_workers) as pool:
-            futures = [pool.submit(self._run, source, batch) for source, batch in batches]
+            futures = [submit(pool, self._run, source, batch) for source, batch in batches]
             for done, future in enumerate(as_completed(futures), start=1):
                 results.append(future.result())
                 if progress:

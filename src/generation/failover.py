@@ -126,6 +126,9 @@ class FailoverChatModel(BaseChatModel):
             ]
 
     def _failed(self, index: int, error: BaseException) -> None:
+        from src.monitoring.meter import record
+        if index + 1 < len(self.models):
+            record(failovers=1)
         kind = classify_error(error)
         print(f"[LLM] {self.names[index]} failed ({kind}): {str(error)[:160]}")
         if kind in ("rate_limit", "unavailable"):

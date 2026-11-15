@@ -62,6 +62,9 @@ from src.query_construction.self_query import (
 from src.query_construction.text_to_cypher import TextToCypher
 from src.query_construction.text_to_sql import TextToSQL
 from src.pipeline.planner import Plan, QueryPlanner
+from src.generation.failover import classify_error
+from src.monitoring.meter import Meter, MeteredChatModel, iterate_metered, run_metered, submit
+from src.monitoring.telemetry import Telemetry
 from src.generation.generator import (
     SOURCES_HEADER,
     create_llm,
@@ -84,6 +87,71 @@ class IngestResult:
     sources: list[str] = field(default_factory=list)
     # Set when ingest_files(background=True): runs graph extraction + RAPTOR.
     enrich: Callable[[Progress | None], None] | None = None
+
+
+class _IngestTracker:
+    """Times each indexing stage and records the upload in telemetry."""
+
+    def __init__(self, telemetry: Telemetry, progress: Progress | None):
+        self.telemetry = telemetry
+        self.outer = progress
+        self.meter = Meter()
+        self.started = time.perf_counter()
+        self.stage_s: dict[str, float] = {}
+        self._stage: str | None = None
+        self._since = self.started
+        self.row: dict = {}
+
+    def progress(self, stage: str, done: int, total: int) -> None:
+        now = time.perf_counter()
+        if stage != self._stage:
+            if self._stage:
+                self.stage_s[self._stage] = self.stage_s.get(self._stage, 0.0) + now - self._since
+            self._stage, self._since = stage, now
+        if self.outer:
+            self.outer(stage, done, total)
+
+    def searchable(self, documents: list[Document], files: list[str], written: int) -> None:
+        pages: dict[str, int] = {}
+        for d in documents:
+            if isinstance(d.metadata.get("page"), int):
+                src = str(d.metadata.get("source", ""))
+                pages[src] = max(pages.get(src, 0), d.metadata["page"])
+        self.row = {
+            "files": [Path(f).name for f in files],
+            "bytes": sum(Path(f).stat().st_size for f in files if Path(f).is_file()),
+            "pages": sum(pages.values()) or None,
+            "chars": sum(len(d.page_content) for d in documents),
+            "chunks": written,
+            "searchable_s": round(time.perf_counter() - self.started, 2),
+        }
+        self.progress("enrichment", 0, 1)
+
+    def finish(self, error: str | None = None) -> None:
+        self.progress("finished", 1, 1)
+        self.stage_s.pop("enrichment", None)
+        searchable = self.row.get("searchable_s") or 0.0
+        self.telemetry.record_ingestion(
+            **self.row,
+            enrich_s=round(time.perf_counter() - self.started - searchable, 2) if self.row else None,
+            stage_s={k: round(v, 2) for k, v in self.stage_s.items() if k != "finished"},
+            llm_calls=self.meter.llm_calls,
+            input_tokens=self.meter.input_tokens,
+            output_tokens=self.meter.output_tokens,
+            error=error,
+        )
+
+    def wrap_enrich(self, enrich: Callable[[Progress | None], None]) -> Callable[[Progress | None], None]:
+        def tracked(progress: Progress | None = None) -> None:
+            if progress is not None:
+                self.outer = progress
+            try:
+                run_metered(self.meter, enrich, self.progress)
+            except Exception as e:
+                self.finish(error=classify_error(e))
+                raise
+            self.finish()
+        return tracked
 
 
 @dataclass
@@ -159,6 +227,8 @@ class RAGPipeline:
         self.relational = RelationalStore(config.relational_db.path)
         self.graph = GraphStore(config.graph_db.path)
         self.docstore = DocStore(config.indexing.docstore_path)
+        mon = config.monitoring
+        self.telemetry = Telemetry(mon.path, enabled=mon.enabled, store_questions=mon.store_questions)
         self._catalog = MetadataCatalog()
         self._router: LogicalRouter | None = None
         self._semantic_router: SemanticRouter | None = None
@@ -178,7 +248,8 @@ class RAGPipeline:
     @property
     def llm(self) -> BaseChatModel:
         if self._llm is None:
-            self._llm = create_llm(self.config.llm)
+            # Metered: every call is counted for monitoring.
+            self._llm = MeteredChatModel(model=create_llm(self.config.llm))
         return self._llm
 
     @property
@@ -220,17 +291,21 @@ class RAGPipeline:
         print("=" * 60)
         started = time.perf_counter()
 
+        tracker = _IngestTracker(self.telemetry, progress)
+        tracker.progress("loading", 0, 1)
         documents = load_documents(self.config.documents, extraction_config=self.config.extraction)
         if not documents:
             print("\n[ERROR] No documents found. Check your config.yaml sources.")
             return
 
-        written, enrich = self._index_documents(documents, rebuild=rebuild, progress=progress)
+        written, enrich = run_metered(tracker.meter, self._index_documents, documents, rebuild, tracker.progress)
         if not written:
             print("\n[ERROR] No chunks generated. Check chunking settings.")
             return
+        sources = sorted({str(d.metadata.get("source", "")) for d in documents})
+        tracker.searchable(documents, sources, written)
         print(f"[OK] Searchable after {time.perf_counter() - started:.0f}s")
-        enrich(progress)
+        tracker.wrap_enrich(enrich)(progress)
 
         print("\n" + "=" * 60)
         print(f"  [OK] Ingestion complete in {time.perf_counter() - started:.0f}s")
@@ -252,6 +327,8 @@ class RAGPipeline:
         if not file_paths:
             return IngestResult("No files provided.")
 
+        tracker = _IngestTracker(self.telemetry, progress)
+        progress = tracker.progress
         documents: list[Document] = []
         loaded, failed = [], []
         for i, fp in enumerate(file_paths):
@@ -259,9 +336,8 @@ class RAGPipeline:
             if not path.is_file():
                 failed.append(path.name)
                 continue
-            if progress:
-                progress("loading", i, len(file_paths))
-            pages = (lambda done, total: progress("loading", done, total)) if progress else None
+            progress("loading", i, len(file_paths))
+            pages = lambda done, total: progress("loading", done, total)  # noqa: E731
             docs = _load_from_file(path, extraction_config=self.config.extraction, progress=pages)
             if docs:
                 documents.extend(docs)
@@ -270,12 +346,15 @@ class RAGPipeline:
                 failed.append(path.name)
 
         if not documents:
+            tracker.finish(error="unreadable")
             return IngestResult(
                 f"Could not read {', '.join(failed)}. The file may be empty, scanned without OCR, or unsupported.",
                 failed=failed,
             )
 
-        written, enrich = self._index_documents(documents, progress=progress)
+        written, enrich = run_metered(tracker.meter, self._index_documents, documents, False, progress)
+        tracker.searchable(documents, [fp for fp in file_paths if Path(fp).name in loaded], written)
+        enrich = tracker.wrap_enrich(enrich)
         message = f"Indexed {len(loaded)} file(s) into {written} chunks: {', '.join(loaded)}"
         if failed:
             message += f". Could not read: {', '.join(failed)}"
@@ -284,7 +363,7 @@ class RAGPipeline:
         if background:
             result.enrich = enrich
         else:
-            enrich(progress)
+            enrich(tracker.outer)
         return result
 
     def _index_documents(
@@ -667,7 +746,7 @@ class RAGPipeline:
         # semantic-routing embedding computed while the planner call is out.
         clock = _Clock()
         with ThreadPoolExecutor(max_workers=2) as pool:
-            semantic = pool.submit(self._semantic_route, search_query)
+            semantic = submit(pool, self._semantic_route, search_query)
             plan = self._plan(search_query, available)
             prompt_name, route_prompt, score = semantic.result()
         planning_ms = clock.lap()
@@ -691,13 +770,13 @@ class RAGPipeline:
         with ThreadPoolExecutor(max_workers=3) as pool:
             jobs = {}
             if RELATIONAL_DB in plan.datasources:
-                jobs[RELATIONAL_DB] = pool.submit(_timed, TextToSQL(
+                jobs[RELATIONAL_DB] = submit(pool, _timed, TextToSQL(
                     self.llm, self.relational, cfg.relational_db.max_rows).run, search_query)
             if GRAPH_DB in plan.datasources:
-                jobs[GRAPH_DB] = pool.submit(_timed, TextToCypher(
+                jobs[GRAPH_DB] = submit(pool, _timed, TextToCypher(
                     self.llm, self.graph, cfg.graph_db.max_results).run, search_query)
             if VECTORSTORE in plan.datasources:
-                jobs[VECTORSTORE] = pool.submit(_timed, self._search, plan.queries, plan.metadata_filter)
+                jobs[VECTORSTORE] = submit(pool, _timed, self._search, plan.queries, plan.metadata_filter)
 
             if RELATIONAL_DB in jobs:
                 (sql, docs), ms = jobs[RELATIONAL_DB].result()
@@ -830,8 +909,56 @@ class RAGPipeline:
 
         Events: ``step`` (stage + message), ``token`` (answer text),
         ``reset`` (Self-RAG discarded the answer streamed so far) and a final
-        ``done`` carrying the answer and its source documents.
+        ``done`` carrying the answer and its source documents. Every run is
+        metered (LLM calls, tokens, failovers) and recorded in telemetry.
         """
+        meter = Meter()
+        stage_ms: dict[str, int] = {}
+        datasources: list[str] = []
+        resets = 0
+        done: Event | None = None
+        error: str | None = None
+        started = time.perf_counter()
+        try:
+            for event in iterate_metered(meter, self._run_steps(question, chat_history)):
+                if event.kind == "step":
+                    stage_ms[event.stage] = stage_ms.get(event.stage, 0) + int(event.data.get("ms") or 0)
+                    datasources = event.data.get("datasources", datasources)
+                elif event.kind == "reset":
+                    resets += 1
+                elif event.kind == "done":
+                    done = event
+                yield event
+        except GeneratorExit:
+            error = "cancelled"
+            raise
+        except Exception as e:
+            error = classify_error(e)
+            raise
+        finally:
+            total_ms = int((time.perf_counter() - started) * 1000)
+            if done is not None:
+                stage_ms["generation"] = max(total_ms - sum(stage_ms.values()), 0)
+            self.telemetry.record_query(
+                question=question,
+                strategy=self.config.retrieval.strategy,
+                datasources=datasources,
+                total_ms=total_ms,
+                first_token_ms=done.data.get("first_token_ms") if done else None,
+                stage_ms=stage_ms,
+                llm_calls=meter.llm_calls,
+                failovers=meter.failovers,
+                input_tokens=meter.input_tokens,
+                output_tokens=meter.output_tokens,
+                documents=len(done.documents) if done else None,
+                context_chars=sum(len(d.page_content) for d in done.documents) if done else None,
+                answer_chars=len(done.answer) if done else None,
+                self_rag_retries=resets,
+                model=done.data.get("model") if done else None,
+                error=error,
+            )
+
+    def _run_steps(self, question: str, chat_history: str = "") -> Iterator[Event]:
         started = time.perf_counter()
         search_query = yield from self._condense(question, chat_history)
         retrieval = yield from self._retrieve(search_query)

@@ -205,6 +205,14 @@ chat:
   show_sources: true         # Show source documents in responses
   rewrite_followups: true    # Turn follow-ups into standalone questions before searching
 
+# --- Monitoring ---
+# Every question and upload is recorded locally with the git commit it ran
+# at, so versions can be compared: python -m src.monitoring.report
+monitoring:
+  enabled: true
+  path: "./data/metrics.sqlite"
+  store_questions: true      # false keeps only the numbers
+
 # --- Web UI (FastAPI) ---
 ui:
   title: "RAG Chatbot"

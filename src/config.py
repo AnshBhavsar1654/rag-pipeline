@@ -234,6 +234,13 @@ class ChatConfig(BaseModel):
     rewrite_followups: bool = True
 
 
+class MonitoringConfig(BaseModel):
+    """Local telemetry: per-question and per-upload timings, LLM calls and tokens."""
+    enabled: bool = True
+    path: str = "./data/metrics.sqlite"
+    store_questions: bool = True    # Keep question text alongside the numbers
+
+
 class UIConfig(BaseModel):
     title: str = "RAG Chatbot"
     description: str = "Ask questions about your documents"
@@ -264,6 +271,7 @@ class RAGConfig(BaseModel):
     generation: GenerationConfig = Field(default_factory=GenerationConfig)
     extraction: ExtractionConfig = Field(default_factory=ExtractionConfig)
     chat: ChatConfig = Field(default_factory=ChatConfig)
+    monitoring: MonitoringConfig = Field(default_factory=MonitoringConfig)
     ui: UIConfig = Field(default_factory=UIConfig)
 
 
