@@ -72,18 +72,22 @@ def commit_info(ref: str) -> dict:
     return {"ref": ref, "commit": sha[:7], "subject": subject, "date": date}
 
 
-def run_version(ref: str, dataset: Path, llm: bool, workdir: Path) -> Path | None:
+def run_version(ref: str, dataset: Path, llm: bool, workdir: Path, label: str | None = None) -> Path | None:
     info = commit_info(ref)
+    if label:   # an experiment (e.g. a config change): keep it apart from the plain commit
+        info.update(label=label, subject=label, commit=f"{info['commit']}/{label}")
     tree = None
     if ref == "WORKTREE":
         code_dir = ROOT
     else:
-        code_dir = workdir / f"tree-{info['commit']}"
+        sha = info["commit"].split("/")[0]
+        code_dir = workdir / f"tree-{sha}"
         if not code_dir.exists():
-            git("worktree", "add", "--detach", str(code_dir), info["commit"])
+            git("worktree", "add", "--detach", str(code_dir), sha)
         tree = code_dir
     mode = "llm" if llm else "offline"
-    out = RESULTS / dataset.stem / f"{datetime.now():%Y%m%d-%H%M%S}_{info['commit'].replace('+', '-')}_{mode}.json"
+    safe = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in info["commit"])
+    out = RESULTS / dataset.stem / f"{datetime.now():%Y%m%d-%H%M%S}_{safe}_{mode}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     cmd = [sys.executable, str(Path(__file__).resolve()), "--child", "--code-dir", str(code_dir),
            "--dataset-file", str(dataset), "--out", str(out), "--version-json", json.dumps(info)]
@@ -91,7 +95,7 @@ def run_version(ref: str, dataset: Path, llm: bool, workdir: Path) -> Path | Non
         cmd.append("--llm")
     print(f"\n=== {info['commit']} ({info['subject']}) on {dataset.stem}, {mode}")
     env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
-    scratch = workdir / f"run-{info['commit']}-{dataset.stem}"
+    scratch = workdir / f"run-{safe}-{dataset.stem}"
     scratch.mkdir(parents=True, exist_ok=True)
     started = time.time()
     proc = subprocess.run(cmd, cwd=scratch, env=env)
@@ -124,7 +128,7 @@ def parent(args) -> None:
     try:
         for dataset in runnable:
             for ref in refs:
-                path = run_version(ref, dataset, args.llm, workdir)
+                path = run_version(ref, dataset, args.llm, workdir, args.label)
                 if path:
                     written.append(path)
     finally:
@@ -334,6 +338,7 @@ def main() -> None:
     parser.add_argument("--ref", action="append", help="git ref to benchmark (repeatable); default: working tree")
     parser.add_argument("--dataset", action="append", help="dataset name (repeatable); default: all available")
     parser.add_argument("--llm", action="store_true", help="also generate and score answers (uses API quota)")
+    parser.add_argument("--label", help="name this run as an experiment (e.g. after editing config.yaml)")
     parser.add_argument("--child", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--code-dir", help=argparse.SUPPRESS)
     parser.add_argument("--dataset-file", help=argparse.SUPPRESS)
