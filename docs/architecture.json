@@ -1,0 +1,541 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "RAG Pipeline Architecture",
+    "output": ".archify/architecture-rag-pipeline-20261115-225324/rag-pipeline.html",
+    "quality_profile": "showcase",
+    "locale": "en",
+    "repository": {
+      "url": "https://github.com/AnshBhavsar1654/rag-pipeline",
+      "provider": "github",
+      "link_mode": "web",
+      "revision": "ad168375565c1b9603a4f5cc481e374dd1b5e832"
+    }
+  },
+  "components": [
+    {
+      "id": "ui",
+      "type": "frontend",
+      "label": "Web UI · CLI",
+      "sublabel": "FastAPI SSE · cli.py",
+      "pos": [
+        40,
+        256
+      ],
+      "size": [
+        130,
+        64
+      ],
+      "sources": [
+        {
+          "path": "app.py",
+          "line": 121,
+          "end_line": 157,
+          "label": "POST /api/chat streams events"
+        },
+        {
+          "path": "cli.py",
+          "line": 69,
+          "end_line": 83,
+          "label": "terminal event loop"
+        }
+      ]
+    },
+    {
+      "id": "translation",
+      "type": "backend",
+      "label": "Query Translation",
+      "sublabel": "RAG-Fusion · HyDE · …",
+      "pos": [
+        250,
+        256
+      ],
+      "size": [
+        130,
+        64
+      ],
+      "sources": [
+        {
+          "path": "src/query_translation/__init__.py",
+          "line": 16,
+          "end_line": 33,
+          "label": "strategy factory"
+        },
+        {
+          "path": "src/pipeline/rag_pipeline.py",
+          "line": 488,
+          "end_line": 495,
+          "label": "step 1"
+        }
+      ]
+    },
+    {
+      "id": "routing",
+      "type": "backend",
+      "label": "Routing",
+      "sublabel": "logical · semantic",
+      "pos": [
+        460,
+        256
+      ],
+      "size": [
+        130,
+        64
+      ],
+      "sources": [
+        {
+          "path": "src/routing/logical.py",
+          "line": 39,
+          "end_line": 59,
+          "label": "LLM picks data stores"
+        },
+        {
+          "path": "src/routing/semantic.py",
+          "line": 15,
+          "end_line": 40,
+          "label": "embedding picks prompt"
+        },
+        {
+          "path": "src/pipeline/rag_pipeline.py",
+          "line": 497,
+          "end_line": 518,
+          "label": "step 2"
+        }
+      ]
+    },
+    {
+      "id": "construction",
+      "type": "backend",
+      "label": "Query Construction",
+      "sublabel": "SQL · Cypher · self-query",
+      "pos": [
+        670,
+        250
+      ],
+      "size": [
+        130,
+        76
+      ],
+      "sources": [
+        {
+          "path": "src/query_construction/text_to_sql.py",
+          "line": 44,
+          "end_line": 82,
+          "label": "Text-to-SQL"
+        },
+        {
+          "path": "src/query_construction/text_to_cypher.py",
+          "line": 47,
+          "end_line": 92,
+          "label": "Text-to-Cypher"
+        },
+        {
+          "path": "src/query_construction/self_query.py",
+          "line": 93,
+          "end_line": 130,
+          "label": "self-query filter"
+        }
+      ]
+    },
+    {
+      "id": "graphdb",
+      "type": "database",
+      "label": "Graph DB",
+      "sublabel": "NetworkX + Cypher",
+      "pos": [
+        880,
+        160
+      ],
+      "size": [
+        130,
+        64
+      ],
+      "sources": [
+        {
+          "path": "src/stores/graph.py",
+          "line": 38,
+          "end_line": 190,
+          "label": "GraphStore"
+        }
+      ]
+    },
+    {
+      "id": "reldb",
+      "type": "database",
+      "label": "Relational DB",
+      "sublabel": "SQLite tables",
+      "pos": [
+        880,
+        256
+      ],
+      "size": [
+        130,
+        64
+      ],
+      "sources": [
+        {
+          "path": "src/stores/relational.py",
+          "line": 115,
+          "end_line": 245,
+          "label": "RelationalStore"
+        }
+      ]
+    },
+    {
+      "id": "vectorstore",
+      "type": "database",
+      "label": "Vectorstore",
+      "sublabel": "Chroma + BM25 hybrid",
+      "pos": [
+        880,
+        392
+      ],
+      "size": [
+        130,
+        64
+      ],
+      "sources": [
+        {
+          "path": "src/stores/vectorstore.py",
+          "line": 127,
+          "end_line": 152,
+          "label": "persisted Chroma"
+        },
+        {
+          "path": "src/retrieval/hybrid.py",
+          "line": 27,
+          "end_line": 76,
+          "label": "dense + BM25 → RRF"
+        }
+      ]
+    },
+    {
+      "id": "retrieval",
+      "type": "backend",
+      "label": "Retrieval",
+      "sublabel": "re-rank · CRAG grade",
+      "pos": [
+        1090,
+        250
+      ],
+      "size": [
+        130,
+        76
+      ],
+      "sources": [
+        {
+          "path": "src/retrieval/ranking.py",
+          "line": 49,
+          "end_line": 152,
+          "label": "cross-encoder/RankGPT/ColBERT"
+        },
+        {
+          "path": "src/retrieval/refinement.py",
+          "line": 40,
+          "end_line": 58,
+          "label": "CRAG relevance grader"
+        },
+        {
+          "path": "src/pipeline/rag_pipeline.py",
+          "line": 554,
+          "end_line": 581,
+          "label": "steps 4-5"
+        }
+      ]
+    },
+    {
+      "id": "generation",
+      "type": "backend",
+      "label": "Generation",
+      "sublabel": "cited answer · Self-RAG",
+      "pos": [
+        1090,
+        60
+      ],
+      "size": [
+        130,
+        64
+      ],
+      "sources": [
+        {
+          "path": "src/generation/generator.py",
+          "line": 173,
+          "end_line": 183,
+          "label": "grounded streaming answer"
+        },
+        {
+          "path": "src/generation/self_rag.py",
+          "line": 68,
+          "end_line": 80,
+          "label": "grounded + useful check"
+        },
+        {
+          "path": "src/pipeline/rag_pipeline.py",
+          "line": 622,
+          "end_line": 677,
+          "label": "Self-RAG loop"
+        }
+      ]
+    },
+    {
+      "id": "web",
+      "type": "external",
+      "label": "Web search",
+      "sublabel": "DuckDuckGo",
+      "pos": [
+        1090,
+        420
+      ],
+      "size": [
+        130,
+        64
+      ],
+      "sources": [
+        {
+          "path": "src/retrieval/active.py",
+          "line": 43,
+          "end_line": 62,
+          "label": "CRAG web search"
+        }
+      ]
+    },
+    {
+      "id": "indexing",
+      "type": "backend",
+      "label": "Indexing",
+      "sublabel": "semantic split · RAPTOR",
+      "pos": [
+        880,
+        560
+      ],
+      "size": [
+        130,
+        64
+      ],
+      "sources": [
+        {
+          "path": "src/pipeline/rag_pipeline.py",
+          "line": 273,
+          "end_line": 315,
+          "label": "writes every store"
+        },
+        {
+          "path": "src/indexing/chunking.py",
+          "line": 76,
+          "end_line": 103,
+          "label": "semantic splitter"
+        },
+        {
+          "path": "src/indexing/raptor.py",
+          "line": 61,
+          "end_line": 118,
+          "label": "RAPTOR tree"
+        }
+      ]
+    },
+    {
+      "id": "docstore",
+      "type": "database",
+      "label": "Docstore",
+      "sublabel": "parent chunks",
+      "pos": [
+        670,
+        560
+      ],
+      "size": [
+        130,
+        64
+      ],
+      "sources": [
+        {
+          "path": "src/indexing/multi_representation.py",
+          "line": 31,
+          "end_line": 92,
+          "label": "DocStore (SQLite)"
+        }
+      ]
+    },
+    {
+      "id": "docs",
+      "type": "external",
+      "label": "Documents",
+      "sublabel": "PDF · DOCX · CSV · URL",
+      "pos": [
+        1090,
+        560
+      ],
+      "size": [
+        130,
+        64
+      ],
+      "sources": [
+        {
+          "path": "src/indexing/loaders/loader.py",
+          "line": 158,
+          "end_line": 194,
+          "label": "universal loader"
+        },
+        {
+          "path": "ingest.py",
+          "line": 38,
+          "end_line": 38,
+          "label": "ingest.py entry"
+        }
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "ask",
+      "from": "ui",
+      "to": "translation",
+      "label": "question",
+      "variant": "emphasis"
+    },
+    {
+      "id": "translate",
+      "from": "translation",
+      "to": "routing",
+      "label": "queries",
+      "variant": "emphasis"
+    },
+    {
+      "id": "route",
+      "from": "routing",
+      "to": "construction",
+      "label": "stores",
+      "variant": "emphasis"
+    },
+    {
+      "id": "cypher",
+      "from": "construction",
+      "to": "graphdb",
+      "label": "Cypher"
+    },
+    {
+      "id": "sql",
+      "from": "construction",
+      "to": "reldb",
+      "label": "SQL"
+    },
+    {
+      "id": "filtered-search",
+      "from": "construction",
+      "to": "vectorstore",
+      "label": "filter"
+    },
+    {
+      "id": "graph-facts",
+      "from": "graphdb",
+      "to": "retrieval",
+      "label": "facts"
+    },
+    {
+      "id": "sql-rows",
+      "from": "reldb",
+      "to": "retrieval",
+      "label": "rows"
+    },
+    {
+      "id": "passages",
+      "from": "vectorstore",
+      "to": "retrieval",
+      "label": "passages"
+    },
+    {
+      "id": "relevant-docs",
+      "from": "retrieval",
+      "to": "generation",
+      "label": "relevant docs",
+      "variant": "emphasis"
+    },
+    {
+      "id": "crag-web",
+      "from": "retrieval",
+      "to": "web",
+      "label": "CRAG web",
+      "variant": "dashed"
+    },
+    {
+      "id": "answer",
+      "from": "generation",
+      "to": "ui",
+      "label": "answer + trace",
+      "variant": "emphasis",
+      "fromSide": "top",
+      "toSide": "top"
+    },
+    {
+      "id": "self-rag-retry",
+      "from": "generation",
+      "to": "translation",
+      "label": "Self-RAG re-retrieve",
+      "variant": "dashed",
+      "fromSide": "left",
+      "toSide": "top"
+    },
+    {
+      "id": "load",
+      "from": "docs",
+      "to": "indexing",
+      "label": "load"
+    },
+    {
+      "id": "index-vectors",
+      "from": "indexing",
+      "to": "vectorstore",
+      "label": "chunks"
+    },
+    {
+      "id": "index-parents",
+      "from": "indexing",
+      "to": "docstore",
+      "label": "parents"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "rose",
+      "title": "Query translation",
+      "items": [
+        "RAG-Fusion, Multi-Query, Decomposition, Step-Back, HyDE",
+        "Follow-ups rewritten into standalone questions first"
+      ]
+    },
+    {
+      "dot": "orange",
+      "title": "Routing + construction",
+      "items": [
+        "Logical: LLM picks vectorstore / relational DB / graph DB",
+        "Semantic: closest prompt by embedding similarity",
+        "Text-to-SQL, Text-to-Cypher, self-query metadata filter"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "Indexing",
+      "items": [
+        "Tables and CSVs are loaded into the relational DB",
+        "LLM-extracted triples are written to the graph DB",
+        "Child chunks are searched; their parents come from the docstore"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Retrieval",
+      "items": [
+        "Re-rank: cross-encoder, Cohere, RankGPT or ColBERT",
+        "CRAG drops irrelevant docs; too few → rewrite and search again + web"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "Generation",
+      "items": [
+        "Answers cite numbered passages",
+        "Self-RAG: regenerate if ungrounded, re-retrieve if off-topic"
+      ]
+    }
+  ]
+}
