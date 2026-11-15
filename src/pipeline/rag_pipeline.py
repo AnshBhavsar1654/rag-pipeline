@@ -7,6 +7,7 @@ vector store, retrieval strategies, re-ranking, and generation.
 
 from __future__ import annotations
 
+import threading
 import time
 from collections import OrderedDict
 from collections.abc import Callable, Generator, Iterator
@@ -166,6 +167,7 @@ class RAGPipeline:
         self._answer_grader: AnswerGrader | None = None
         self._planner: QueryPlanner | None = None
         self._plan_cache: OrderedDict = OrderedDict()
+        self._cache_lock = threading.Lock()
 
     @classmethod
     def from_config(cls, config_path: str | None = None) -> "RAGPipeline":
@@ -524,6 +526,16 @@ class RAGPipeline:
         print(f"[STRAT] Retrieval strategy: {self.strategy_name}")
         print("[OK] Pipeline ready!\n")
 
+    def warm_up(self) -> None:
+        """Load models and caches now, so the first question isn't the slow one."""
+        started = time.perf_counter()
+        self.embeddings.embed_query("warm up")
+        if self._reranker is not None:
+            self._reranker.warm_up()
+        self._semantic_route("warm up")
+        _ = self.llm  # build the client
+        print(f"[OK] Warmed up in {time.perf_counter() - started:.1f}s")
+
     def _llm_if_needed(self):
         return self.llm if self.config.reranking.provider == "rankgpt" else None
 
@@ -612,15 +624,17 @@ class RAGPipeline:
 
         if cfg.retrieval.planner:
             key = (search_query, tuple(available))
-            if key in self._plan_cache:
-                self._plan_cache.move_to_end(key)
-                return self._plan_cache[key]
+            with self._cache_lock:
+                if key in self._plan_cache:
+                    self._plan_cache.move_to_end(key)
+                    return self._plan_cache[key]
             if self._planner is None:
                 self._planner = QueryPlanner(self.llm, cfg.retrieval.strategy, self._num_queries())
             plan = self._planner.plan(search_query, self._translator, routes, self._catalog, use_filter)
-            self._plan_cache[key] = plan
-            if len(self._plan_cache) > 128:
-                self._plan_cache.popitem(last=False)
+            with self._cache_lock:
+                self._plan_cache[key] = plan
+                if len(self._plan_cache) > 128:
+                    self._plan_cache.popitem(last=False)
         else:
             queries = self._translator.translate(search_query)
             if len(routes) > 1:
@@ -821,8 +835,10 @@ class RAGPipeline:
         ``reset`` (Self-RAG discarded the answer streamed so far) and a final
         ``done`` carrying the answer and its source documents.
         """
+        started = time.perf_counter()
         search_query = yield from self._condense(question, chat_history)
         retrieval = yield from self._retrieve(search_query)
+        first_token_ms = None
 
         self_rag = self.config.generation.self_rag
         extra_rule = ""
@@ -838,6 +854,8 @@ class RAGPipeline:
             ):
                 if not piece:   # reasoning models stream empty chunks while thinking
                     continue
+                if first_token_ms is None:
+                    first_token_ms = int((time.perf_counter() - started) * 1000)
                 answer += piece
                 yield Event("token", text=piece)
 
@@ -869,7 +887,11 @@ class RAGPipeline:
                     "State only what the passages say."
                 )
 
-        yield Event("done", answer=answer, documents=retrieval.documents)
+        yield Event("done", answer=answer, documents=retrieval.documents, data={
+            "ms": int((time.perf_counter() - started) * 1000),
+            "first_token_ms": first_token_ms,
+            "model": getattr(self.llm, "last_used", "") or f"{self.config.llm.provider}:{self.config.llm.model}",
+        })
 
     def query(
         self,
