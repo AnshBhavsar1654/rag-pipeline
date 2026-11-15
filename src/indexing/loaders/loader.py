@@ -55,13 +55,23 @@ def _load_from_url(url: str) -> list[Document]:
 def _load_from_file(
     file_path: Path,
     extraction_config: ExtractionConfig | None = None,
+    progress=None,
 ) -> list[Document]:
     """Load documents from a single file based on its extension.
 
     For PDFs and DOCX files, also extracts tables and images
-    if extraction_config is provided and enabled.
+    if extraction_config is provided and enabled. *progress(done, total)*
+    is called while a PDF's pages are read.
     """
     ext = file_path.suffix.lower()
+
+    if ext == ".pdf":
+        from src.indexing.loaders import fast_pdf
+        if fast_pdf.available():
+            try:
+                return fast_pdf.load_pdf(file_path, extraction_config, progress)
+            except Exception as e:  # noqa: BLE001
+                print(f"  [WARN]  Fast PDF loader failed ({e}); falling back to pypdf.")
 
     if ext not in _EXTENSION_LOADERS:
         print(f"  [WARN]  Unsupported file type: {file_path} (skipping)")

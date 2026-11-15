@@ -36,6 +36,7 @@ dependencies = [
     "python-multipart>=0.0.33",
     "networkx>=3.6.1",
     "numpy>=2.5.2",
+    "pymupdf>=2.1",
 ]
 
 [dependency-groups]

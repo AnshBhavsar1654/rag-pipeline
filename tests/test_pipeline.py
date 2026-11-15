@@ -310,3 +310,28 @@ def test_lexical_semantic_splitter_cuts_at_the_topic_change():
     chunks = split_documents([doc], cfg, embeddings=DeterministicFakeEmbedding(size=8))
     assert len(chunks) == 2
     assert "Satellites" not in chunks[0].page_content and "Sourdough" not in chunks[1].page_content
+
+
+def test_fast_pdf_loader_reads_pages_and_tables(tmp_path):
+    pymupdf = pytest.importorskip("pymupdf")
+    from src.config import ExtractionConfig
+    from src.indexing.loaders.fast_pdf import load_pdf
+
+    pdf = pymupdf.open()
+    page = pdf.new_page()
+    page.insert_text((72, 72), "The Zorblax-9 weighs 340 grams.")
+    for y in (120, 140, 160):                       # a ruled 2x2 table
+        page.draw_line((72, y), (272, y))
+    for x in (72, 172, 272):
+        page.draw_line((x, 120), (x, 160))
+    page.insert_text((80, 135), "Model")
+    page.insert_text((180, 135), "Grams")
+    page.insert_text((80, 155), "Z9")
+    page.insert_text((180, 155), "340")
+    path = tmp_path / "w.pdf"
+    pdf.save(path)
+
+    docs = load_pdf(path, ExtractionConfig(ocr_enabled=False))
+    assert docs[0].metadata == {"source": str(path), "page": 1, "type": "text"}
+    assert "340 grams" in docs[0].page_content
+    assert any(d.metadata["type"] == "table" and "Grams" in d.page_content for d in docs)
