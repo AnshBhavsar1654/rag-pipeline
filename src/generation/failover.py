@@ -13,6 +13,7 @@ can show to a person, instead of a raw API error.
 
 from __future__ import annotations
 
+import re
 import threading
 import time
 from collections.abc import Iterator
@@ -44,6 +45,26 @@ def classify_error(error: BaseException) -> str:
     return "other"
 
 
+_MAX_COOLDOWN = 24 * 3600
+
+
+def retry_after_seconds(error: BaseException) -> float | None:
+    """How long the provider asked us to wait, if the error says so.
+
+    Understands e.g. "retryDelay': '45683s'", "Please retry in 12h41m23.5s"
+    and "Please try again in 7.66s"."""
+    text = str(error)
+    match = re.search(r"retry_?delay['\"]?\s*[:=]\s*['\"]?([\d.]+)s", text, re.I)
+    if match:
+        return min(float(match.group(1)), _MAX_COOLDOWN)
+    match = re.search(r"(?:retry|try again) in ((?:\d+h)?(?:\d+m(?!s))?(?:[\d.]+s)?)", text, re.I)
+    if match and match.group(1):
+        parts = re.findall(r"([\d.]+)([hms])", match.group(1))
+        seconds = sum(float(v) * {"h": 3600, "m": 60, "s": 1}[u] for v, u in parts)
+        return min(seconds, _MAX_COOLDOWN) if seconds else None
+    return None
+
+
 def friendly_error(error: BaseException) -> str:
     """A short, human message for an error raised while answering."""
     kind = classify_error(error)
@@ -67,6 +88,7 @@ class FailoverChatModel(BaseChatModel):
     cooldown_seconds: float = 60.0
 
     _cooldown_until: dict[int, float] = PrivateAttr(default_factory=dict)
+    _cooldown_reason: dict[int, str] = PrivateAttr(default_factory=dict)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _last_used: str = PrivateAttr(default="")
 
@@ -90,14 +112,33 @@ class FailoverChatModel(BaseChatModel):
             )
         return ready + cooling
 
+    def status(self) -> list[dict]:
+        """Each model, and for how long it is paused (seconds) and why."""
+        now = time.monotonic()
+        with self._lock:
+            return [
+                {
+                    "name": name,
+                    "paused_for": max(0, int(self._cooldown_until.get(i, 0) - now)),
+                    "reason": self._cooldown_reason.get(i, "") if self._cooldown_until.get(i, 0) > now else "",
+                }
+                for i, name in enumerate(self.names)
+            ]
+
     def _failed(self, index: int, error: BaseException) -> None:
         kind = classify_error(error)
         print(f"[LLM] {self.names[index]} failed ({kind}): {str(error)[:160]}")
         if kind in ("rate_limit", "unavailable"):
+            # Honour the provider's own retry delay (a daily quota can mean hours).
+            wait = max(self.cooldown_seconds, retry_after_seconds(error) or 0)
+            daily = "per day" in str(error).lower() or "perday" in str(error).lower()
             with self._lock:
-                self._cooldown_until[index] = time.monotonic() + self.cooldown_seconds
-            if index + 1 < len(self.models):
-                print(f"[LLM] Using {self.names[index + 1]} for the next {self.cooldown_seconds:.0f}s")
+                self._cooldown_until[index] = time.monotonic() + wait
+                self._cooldown_reason[index] = (
+                    "daily free quota used up" if daily
+                    else "rate limited" if kind == "rate_limit" else "temporarily unavailable"
+                )
+            print(f"[LLM] Skipping {self.names[index]} for {wait:.0f}s")
 
     def _generate(
         self,
