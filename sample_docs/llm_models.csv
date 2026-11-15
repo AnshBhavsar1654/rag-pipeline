@@ -1,0 +1,7 @@
+model,developer,parameters_billions,release_year,context_window_tokens,open_weights
+GPT-3,OpenAI,175,2020,2048,no
+PaLM,Google,540,2022,2048,no
+BLOOM,BigScience,176,2022,2048,yes
+Llama 2 70B,Meta,70,2023,4096,yes
+Falcon 180B,Technology Innovation Institute,180,2023,2048,yes
+Mistral 7B,Mistral AI,7.3,2023,8192,yes
