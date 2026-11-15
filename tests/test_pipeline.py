@@ -48,6 +48,7 @@ def config(tmp_path):
         relational_db={"path": str(tmp_path / "rel.sqlite")},
         graph_db={"enabled": False, "path": str(tmp_path / "graph.json")},
         indexing={"docstore_path": str(tmp_path / "docstore.sqlite"), "raptor": {"enabled": False}},
+        monitoring={"path": str(tmp_path / "metrics.sqlite")},
         retrieval={"strategy": "simple", "top_k": 3, "crag": {"enabled": False}},
         reranking={"enabled": False},
         generation={"self_rag": {"enabled": False}},
