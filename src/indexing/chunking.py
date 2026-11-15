@@ -48,29 +48,73 @@ _SENTENCE_END = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9\"'(\[])|\n\s*\n|\n(?=\s*(?:
 
 
 def split_sentences(text: str) -> list[str]:
-    """Split on sentence ends, blank lines, headings and list items."""
-    return [s.strip() for s in _SENTENCE_END.split(text) if s and s.strip()]
+    """Split on sentence ends, blank lines, headings and list items, merging
+    fragments (headings, short list items, PDF line debris) into units of at
+    least ~100 characters so there is less to embed."""
+    units: list[str] = []
+    for piece in _SENTENCE_END.split(text):
+        piece = (piece or "").strip()
+        if not piece:
+            continue
+        if units and len(units[-1]) < _MIN_UNIT_CHARS:
+            units[-1] = f"{units[-1]}\n{piece}"
+        else:
+            units.append(piece)
+    return units
 
 
-def semantic_groups(sentences: list[str], embeddings: Embeddings, percentile: float) -> list[str]:
-    """Join consecutive sentences, breaking where the meaning shifts most."""
+_BOUNDARY_CHARS = 300
+_MIN_UNIT_CHARS = 100
+
+
+def _join(sentences: list[str]) -> str:
+    return "\n".join(sentences)
+
+
+def _smooth(vectors: np.ndarray) -> np.ndarray:
+    """Average each sentence vector with its neighbours for a steadier signal
+    (the same effect as embedding 3-sentence windows, at a third of the cost)."""
+    padded = np.vstack([vectors[:1], vectors, vectors[-1:]])
+    smooth = padded[:-2] + padded[1:-1] + padded[2:]
+    return smooth / (np.linalg.norm(smooth, axis=1, keepdims=True) + 1e-12)
+
+
+def semantic_groups(
+    sentences: list[str],
+    vectors: np.ndarray,
+    lengths: list[int],
+    chunk_size: int,
+    percentile: float,
+) -> list[str]:
+    """Pack consecutive sentences into chunks of up to *chunk_size*, cutting
+    at topic shifts: a strong shift (above *percentile*) ends a chunk once it
+    has some substance, and a full chunk is cut at its biggest shift."""
     if len(sentences) < 3:
         return [" ".join(sentences)] if sentences else []
-    # Embed each sentence with its neighbours for a steadier signal.
-    windows = [" ".join(sentences[max(0, i - 1): i + 2]) for i in range(len(sentences))]
-    vectors = np.array(embeddings.embed_documents(windows), dtype=float)
-    vectors /= np.linalg.norm(vectors, axis=1, keepdims=True) + 1e-12
-    distances = 1.0 - np.sum(vectors[:-1] * vectors[1:], axis=1)
+    v = _smooth(vectors)
+    distances = 1.0 - np.sum(v[:-1] * v[1:], axis=1)       # distances[i]: between i and i+1
     threshold = np.percentile(distances, percentile)
+    min_size = chunk_size // 3
 
-    groups, current = [], [sentences[0]]
-    for sentence, distance in zip(sentences[1:], distances):
-        if distance > threshold:
-            groups.append(current)
-            current = []
-        current.append(sentence)
-    groups.append(current)
-    return ["\n".join(g) for g in groups]
+    groups: list[str] = []
+    start, size = 0, lengths[0]
+    i = 1
+    while i < len(sentences):
+        boundary = i - 1
+        if distances[boundary] > threshold and size >= min_size:
+            groups.append(_join(sentences[start:i]))
+            start, size = i, 0
+        elif size + lengths[i] > chunk_size and i > start:
+            # Full: cut at the biggest shift that leaves a chunk of substance.
+            candidates = [b for b in range(start, i - 1)
+                          if sum(lengths[start: b + 1]) >= min_size]
+            cut = max(candidates, key=lambda b: distances[b]) + 1 if candidates else i
+            groups.append(_join(sentences[start:cut]))
+            start, size = cut, sum(lengths[cut:i])
+        size += lengths[i]
+        i += 1
+    groups.append(_join(sentences[start:]))
+    return [g for g in groups if g.strip()]
 
 
 def split_documents(
@@ -83,16 +127,31 @@ def split_documents(
     semantic = config.method == "semantic" and embeddings is not None
 
     chunks: list[Document] = []
-    for doc in documents:
-        if not semantic or doc.metadata.get("type") == "table":
-            chunks.extend(splitter.split_documents([doc]))
-            continue
-        groups = semantic_groups(
-            split_sentences(doc.page_content), embeddings, config.semantic_breakpoint_percentile,
-        )
-        pieces = [Document(page_content=g, metadata=dict(doc.metadata)) for g in groups if g.strip()]
-        # Cap each topic at chunk_size; short topics pass through unchanged.
-        chunks.extend(splitter.split_documents(pieces))
+    if semantic:
+        # Embed every sentence of every document in one batch: one model pass
+        # instead of one per document.
+        prose = [d for d in documents if d.metadata.get("type") != "table"]
+        per_doc = [split_sentences(d.page_content) for d in prose]
+        flat = [s for sents in per_doc for s in sents]
+        # The opening of a sentence is enough to tell a topic shift, and
+        # truncating keeps long table rows / code lines from dominating cost.
+        probe = [s[:_BOUNDARY_CHARS] for s in flat]
+        vectors = np.array(embeddings.embed_documents(probe), dtype=float) if flat else np.zeros((0, 1))
+        length = splitter._length_function
+        offset = 0
+        for doc, sents in zip(prose, per_doc):
+            n = len(sents)
+            groups = semantic_groups(
+                sents, vectors[offset: offset + n], [length(x) for x in sents],
+                config.chunk_size, config.semantic_breakpoint_percentile,
+            )
+            offset += n
+            pieces = [Document(page_content=g, metadata=dict(doc.metadata)) for g in groups]
+            # A single over-long sentence is still capped at chunk_size.
+            chunks.extend(splitter.split_documents(pieces))
+        chunks.extend(splitter.split_documents([d for d in documents if d.metadata.get("type") == "table"]))
+    else:
+        chunks = splitter.split_documents(documents)
 
     for i, chunk in enumerate(chunks):
         chunk.metadata["chunk_index"] = i
