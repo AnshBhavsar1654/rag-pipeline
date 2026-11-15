@@ -641,6 +641,8 @@ class RAGPipeline:
                 chat_history=chat_history,
                 system_prompt=self._system_prompt(retrieval) + extra_rule,
             ):
+                if not piece:   # reasoning models stream empty chunks while thinking
+                    continue
                 answer += piece
                 yield Event("token", text=piece)
 
