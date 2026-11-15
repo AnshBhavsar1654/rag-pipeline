@@ -779,9 +779,6 @@ class RAGPipeline:
             return expand_to_parents(passages, self.docstore)
         return passages
 
-    def _rank(self, query: str, passages: list[Document]) -> list[Document]:
-        return self._expand(self._rerank(query, passages))
-
     def _grading_mode(self) -> str:
         crag = self.config.retrieval.crag
         if crag.grader == "reranker" and self._reranker is not None and self._reranker.scores_relevance:

@@ -59,15 +59,6 @@ class RAGChatbot:
         self.history: list[ChatMessage] = []
         self._memory_window = pipeline.config.chat.memory_window
 
-    def chat(self, user_message: str) -> str:
-        """Process a user message and return the formatted response (with sources)."""
-        answer, documents = self.pipeline.query(
-            question=user_message,
-            chat_history=self._format_history(),
-        )
-        self._remember(user_message, answer)
-        return self.pipeline.format_response(answer, documents)
-
     def events(self, user_message: str) -> Iterator[Event]:
         """Run the pipeline for *user_message*, yielding its events; remembers the answer."""
         for event in self.pipeline.run(user_message, self._format_history()):
