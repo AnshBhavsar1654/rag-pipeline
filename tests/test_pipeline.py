@@ -292,3 +292,8 @@ def test_parent_documents_replace_child_chunks(config, embeddings):
     docs = pipeline.retrieve("Zorblax-9 filter")
     # children are 40 tokens; the parent holds the whole short file
     assert any("12 volt" in d.page_content and "isopropyl" in d.page_content for d in docs)
+
+
+def test_full_width_citations_are_normalized():
+    from src.generation.generator import normalize_citations
+    assert normalize_citations("Mistral 7B【1】") == "Mistral 7B[1]"

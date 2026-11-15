@@ -97,6 +97,13 @@ _RAG_PROMPT = ChatPromptTemplate.from_messages([
 
 SOURCES_HEADER = "**Sources**"
 
+# Some models cite with full-width lenticular brackets (【1】) despite the rules.
+_CITATION_BRACKETS = str.maketrans({"【": "[", "】": "]", "［": "[", "］": "]"})
+
+
+def normalize_citations(text: str) -> str:
+    return text.translate(_CITATION_BRACKETS)
+
 
 def source_label(doc: Document) -> str:
     """Short human-readable origin of a chunk, e.g. ``report.pdf, p. 3 (table)``."""
@@ -160,7 +167,7 @@ def generate_answer(
         The generated answer string.
     """
     chain = _RAG_PROMPT | llm | StrOutputParser()
-    return chain.invoke(_prompt_inputs(question, documents, chat_history, system_prompt))
+    return normalize_citations(chain.invoke(_prompt_inputs(question, documents, chat_history, system_prompt)))
 
 
 def stream_answer(
@@ -172,7 +179,8 @@ def stream_answer(
 ) -> Iterator[str]:
     """Like :func:`generate_answer`, but yields the answer as it is generated."""
     chain = _RAG_PROMPT | llm | StrOutputParser()
-    yield from chain.stream(_prompt_inputs(question, documents, chat_history, system_prompt))
+    for piece in chain.stream(_prompt_inputs(question, documents, chat_history, system_prompt)):
+        yield normalize_citations(piece)
 
 
 def format_sources(documents: list[Document], snippet_chars: int = 150) -> str:

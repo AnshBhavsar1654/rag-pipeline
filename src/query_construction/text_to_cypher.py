@@ -26,6 +26,7 @@ Rules:
 - Compare names with lower-case strings, e.g. WHERE a.name == "gpt-4", or \
 use CONTAINS for partial matches.
 - Use only the labels and relationship types in the schema.
+- Use exactly ONE MATCH clause containing ONE path pattern, e.g. MATCH (a)-[r:TYPE]->(b) or MATCH (a)-[r1]->(b)<-[r2]-(c). No commas between patterns, no second MATCH, no OPTIONAL MATCH, no WITH.
 - RETURN node names (e.g. a.name, b.name), not whole nodes.
 - Output ONLY the Cypher query.
 

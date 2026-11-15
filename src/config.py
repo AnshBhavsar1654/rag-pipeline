@@ -153,7 +153,7 @@ def _default_prompt_routes() -> dict[str, PromptRoute]:
             prompt="Explain step by step, starting from the basics, and define any jargon.",
         ),
         "compare": PromptRoute(
-            description="Compare or contrast things, differences, pros and cons, X versus Y.",
+            description="Compare or contrast two or more named things: differences, X versus Y, which is better.",
             prompt="Structure the answer as a comparison; use a Markdown table when it helps.",
         ),
         "numbers": PromptRoute(

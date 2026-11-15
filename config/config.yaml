@@ -140,7 +140,7 @@ routing:
       description: "Explain a concept, how something works, or why something happens."
       prompt: "Explain step by step, starting from the basics, and define any jargon."
     compare:
-      description: "Compare or contrast things, differences, pros and cons, X versus Y."
+      description: "Compare or contrast two or more named things: differences, X versus Y, which is better."
       prompt: "Structure the answer as a comparison; use a Markdown table when it helps."
     numbers:
       description: "Numbers, statistics, amounts, totals, prices, dates or rankings."

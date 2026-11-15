@@ -38,7 +38,7 @@ def parse_relevant(text: str, count: int) -> list[bool]:
 
 
 class RelevanceGrader:
-    def __init__(self, llm: BaseChatModel, max_words: int = 200):
+    def __init__(self, llm: BaseChatModel, max_words: int = 700):
         self._chain = _GRADE_PROMPT | llm | StrOutputParser()
         self._max_words = max_words
 
