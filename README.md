@@ -123,9 +123,11 @@ RAG/
 │   │                            # parent-document/summary representations, RAPTOR
 │   ├── retrieval/               # hybrid search, ranking, CRAG refinement and active retrieval
 │   ├── generation/              # LLM factory (+ fallback), grounded prompt, Self-RAG checks
-│   ├── pipeline/                # orchestrator: ingestion and the event-streaming query run
+│   ├── pipeline/                # orchestrator: ingestion, query planner, event-streaming run
+│   ├── monitoring/              # LLM usage meter, telemetry store, report
 │   └── chat/                    # conversation memory
 ├── web/                         # UI: index.html, app.js, style.css
+├── benchmarks/                  # version benchmarks: run.py, compare.py, datasets/, results/
 ├── tests/                       # offline tests
 ├── app.py                       # FastAPI server (SSE chat stream, uploads)
 ├── cli.py                       # terminal chatbot
@@ -269,12 +271,67 @@ the lightest setup use `strategy: "simple"` and turn off `self_rag`.
 
 Uploading makes a file searchable as soon as it is loaded, chunked and
 embedded; graph extraction and RAPTOR summaries then run in the background
-with progress in the sidebar, and you can ask questions meanwhile. On a
-346-page PDF on a laptop CPU the searchable phase went from about 4 minutes
-plus roughly 50 minutes of blocking LLM calls to under 2 minutes, and the
-background enrichment makes about a tenth as many LLM calls as before.
-Embedding is the remaining floor on CPU; a GPU, or `embedding.provider:
-"google"`, makes it much faster.
+with progress in the sidebar, and you can ask questions meanwhile. On CPU,
+embedding is the main remaining cost; a GPU or `embedding.provider: "google"`
+makes it much faster. Measured numbers per version are in
+[`benchmarks/RESULTS.md`](benchmarks/RESULTS.md); see the next section.
+
+---
+
+## Monitoring and benchmarks
+
+Two tools turn changes into numbers.
+
+### Benchmarks: compare versions on fixed questions
+
+```bash
+python benchmarks/run.py                                 # the working tree, offline, every dataset
+python benchmarks/run.py --ref ac2f37a --ref HEAD --repeat 3   # check out commits, interleave 3 runs each
+python benchmarks/run.py --dataset sample --llm          # also generate and score answers (uses quota)
+python benchmarks/run.py --label "chunk 300"             # an experiment after editing config.yaml
+python benchmarks/compare.py --write                     # table of every version → benchmarks/RESULTS.md
+```
+
+Each question in `benchmarks/datasets/*.yaml` names the evidence text that a
+relevant passage contains and the keywords a correct answer contains. A run
+indexes the dataset's corpus into temporary stores and records:
+
+| Area | Metrics |
+| --- | --- |
+| Ingestion | wall time (embedding-model load excluded), chunks, LLM calls |
+| Retrieval | Hit@1/3/5 and MRR from the rank of the first passage containing the evidence; passages and characters sent to the LLM; latency p50/p95 |
+| Answers (`--llm`) | accuracy against the expected keywords, latency p50/p95, first-token latency, LLM calls per question, errors |
+
+Offline mode, the default, makes no LLM calls (query translation is set to
+simple, LLM-only stages are off, and a stand-in model refuses and counts any
+call), so it compares chunking, indexing, hybrid search, re-ranking and parent
+documents across versions for free. Older commits are checked out into a
+temporary git worktree and driven only through APIs every version has, with
+that version's own `config.yaml`, so each is measured with its own defaults.
+Results land in `benchmarks/results/<dataset>/` as JSON.
+
+Quality metrics are deterministic; timings are not, since they depend on the
+machine and what else it is doing. Compare versions run in the same session,
+and use `--repeat` so runs interleave and `compare.py` reports medians with
+their min–max range. The `sample` dataset uses the repo's own documents; the
+`aws_ml` dataset needs the Amazon ML Developer Guide PDF at
+`data/uploads/machinelearning-aws.pdf` and is skipped without it.
+
+### Telemetry: every real question and upload
+
+With `monitoring.enabled` (the default) every question and upload is recorded
+in `data/metrics.sqlite`, tagged with the git commit the code ran at: total and
+first-token latency, time per stage, LLM calls, tokens, failovers, Self-RAG
+retries, errors and, for uploads, seconds until searchable, enrichment time
+and LLM calls. Nothing leaves your machine; set `monitoring.store_questions:
+false` to keep only the numbers.
+
+```bash
+python -m src.monitoring.report      # one column per version you have run
+```
+
+The same summary is served at `/api/metrics`, and the sidebar shows the
+current version's median answer time and LLM calls.
 
 ---
 
