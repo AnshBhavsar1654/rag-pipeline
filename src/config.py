@@ -30,6 +30,25 @@ class ChunkingConfig(BaseModel):
     chunk_overlap: int = 60
     use_tiktoken: bool = True
     tiktoken_encoding: str = "cl100k_base"
+    # "semantic" breaks chunks where the meaning shifts between sentences;
+    # "recursive" splits on paragraphs/lines/sentences by length only.
+    method: Literal["recursive", "semantic"] = "semantic"
+    semantic_breakpoint_percentile: float = 90
+
+
+class RaptorConfig(BaseModel):
+    enabled: bool = True
+    cluster_size: int = 6       # Average chunks per cluster summary
+    max_levels: int = 3
+
+
+class IndexingConfig(BaseModel):
+    # none: chunks only | parent_document: search small chunks, answer with
+    # their larger parent | summary: parent_document + an LLM summary per parent
+    multi_representation: Literal["none", "parent_document", "summary"] = "parent_document"
+    parent_chunk_size: int = 1000
+    docstore_path: str = "./data/docstore.sqlite"
+    raptor: RaptorConfig = Field(default_factory=RaptorConfig)
 
 
 class EmbeddingConfig(BaseModel):
@@ -56,6 +75,14 @@ class RelationalDBConfig(BaseModel):
     enabled: bool = True
     path: str = "./data/relational.sqlite"
     max_rows: int = 50          # Rows of a SQL result passed to the LLM
+
+
+class GraphDBConfig(BaseModel):
+    """Knowledge graph built by LLM triple extraction (Text-to-Cypher target)."""
+    enabled: bool = True
+    path: str = "./data/graph.json"
+    extraction_batch_size: int = 6   # Chunks per extraction call
+    max_results: int = 50
 
 
 class LLMConfig(BaseModel):
@@ -100,6 +127,49 @@ class RetrievalConfig(BaseModel):
     multi_query: MultiQueryConfig = Field(default_factory=MultiQueryConfig)
     rag_fusion: RAGFusionConfig = Field(default_factory=RAGFusionConfig)
     hyde: HyDEConfig = Field(default_factory=HyDEConfig)
+
+
+class PromptRoute(BaseModel):
+    description: str        # What questions this prompt suits (gets embedded)
+    prompt: str = ""        # Extra instructions appended to the system prompt
+
+
+def _default_prompt_routes() -> dict[str, PromptRoute]:
+    return {
+        "general": PromptRoute(
+            description="A general question about the documents, asking for a fact or detail.",
+        ),
+        "explain": PromptRoute(
+            description="Explain a concept, how something works, or why something happens.",
+            prompt="Explain step by step, starting from the basics, and define any jargon.",
+        ),
+        "compare": PromptRoute(
+            description="Compare or contrast things, differences, pros and cons, X versus Y.",
+            prompt="Structure the answer as a comparison; use a Markdown table when it helps.",
+        ),
+        "numbers": PromptRoute(
+            description="Numbers, statistics, amounts, totals, prices, dates or rankings.",
+            prompt="Lead with the exact figures and units, and show any calculation you make.",
+        ),
+        "summarize": PromptRoute(
+            description="Summarize, give an overview, or list the key points of a document or topic.",
+            prompt="Give a concise overview as bullet points of the key points.",
+        ),
+    }
+
+
+class RoutingConfig(BaseModel):
+    # Logical: the LLM picks the data store(s) - vectorstore, relational DB, graph DB.
+    logical: bool = True
+    # Semantic: embed the question and pick the most similar prompt below.
+    semantic: bool = True
+    prompts: dict[str, PromptRoute] = Field(default_factory=_default_prompt_routes)
+
+
+class QueryConstructionConfig(BaseModel):
+    text_to_sql: bool = True     # Relational DB
+    text_to_cypher: bool = True  # Graph DB
+    self_query: bool = True      # Vectorstore: metadata filters from the question
 
 
 class RerankingConfig(BaseModel):
@@ -149,11 +219,15 @@ class RAGConfig(BaseModel):
 
     documents: DocumentsConfig = Field(default_factory=DocumentsConfig)
     chunking: ChunkingConfig = Field(default_factory=ChunkingConfig)
+    indexing: IndexingConfig = Field(default_factory=IndexingConfig)
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
     vectorstore: VectorStoreConfig = Field(default_factory=VectorStoreConfig)
     relational_db: RelationalDBConfig = Field(default_factory=RelationalDBConfig)
+    graph_db: GraphDBConfig = Field(default_factory=GraphDBConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
+    routing: RoutingConfig = Field(default_factory=RoutingConfig)
+    query_construction: QueryConstructionConfig = Field(default_factory=QueryConstructionConfig)
     reranking: RerankingConfig = Field(default_factory=RerankingConfig)
     extraction: ExtractionConfig = Field(default_factory=ExtractionConfig)
     chat: ChatConfig = Field(default_factory=ChatConfig)

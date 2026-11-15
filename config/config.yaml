@@ -16,6 +16,23 @@ chunking:
   chunk_overlap: 60
   use_tiktoken: true        # Use tiktoken-aware splitting
   tiktoken_encoding: "cl100k_base"
+  method: "semantic"        # semantic (break where meaning shifts) | recursive (by length)
+  semantic_breakpoint_percentile: 90
+
+# --- Indexing ---
+indexing:
+  # none            : index chunks only
+  # parent_document : search small chunks, hand the LLM their larger parent chunk
+  # summary         : parent_document + an LLM summary of each parent (more LLM calls)
+  multi_representation: "parent_document"
+  parent_chunk_size: 1000   # tokens
+  docstore_path: "./data/docstore.sqlite"
+  # RAPTOR: cluster chunks and summarize each cluster, recursively, into a tree
+  # of summaries searched alongside the chunks. One LLM call per cluster.
+  raptor:
+    enabled: true
+    cluster_size: 6
+    max_levels: 3
 
 # --- Embedding Model ---
 embedding:
@@ -44,6 +61,15 @@ relational_db:
   enabled: true
   path: "./data/relational.sqlite"
   max_rows: 50              # Rows of a SQL result passed to the LLM
+
+# --- Graph DB ---
+# An LLM extracts (entity)-[RELATION]->(entity) triples while indexing; the
+# graph is queried with Text-to-Cypher. Costs one LLM call per batch of chunks.
+graph_db:
+  enabled: true
+  path: "./data/graph.json"
+  extraction_batch_size: 6   # Chunks per extraction call
+  max_results: 50
 
 # --- LLM ---
 llm:
@@ -92,6 +118,35 @@ retrieval:
   # HyDE settings
   hyde:
     hypothesis_prompt: "Please write a detailed passage to answer the question:\nQuestion: {question}\nPassage:"
+
+# --- Routing ---
+routing:
+  logical: true      # LLM picks the data store(s): vectorstore / relational_db / graph_db
+                     # (skipped when only the vectorstore has data)
+  semantic: true     # Embed the question and pick the closest prompt (no LLM call)
+  prompts:
+    general:
+      description: "A general question about the documents, asking for a fact or detail."
+      prompt: ""
+    explain:
+      description: "Explain a concept, how something works, or why something happens."
+      prompt: "Explain step by step, starting from the basics, and define any jargon."
+    compare:
+      description: "Compare or contrast things, differences, pros and cons, X versus Y."
+      prompt: "Structure the answer as a comparison; use a Markdown table when it helps."
+    numbers:
+      description: "Numbers, statistics, amounts, totals, prices, dates or rankings."
+      prompt: "Lead with the exact figures and units, and show any calculation you make."
+    summarize:
+      description: "Summarize, give an overview, or list the key points of a document or topic."
+      prompt: "Give a concise overview as bullet points of the key points."
+
+# --- Query Construction ---
+query_construction:
+  text_to_sql: true      # Relational DB
+  text_to_cypher: true   # Graph DB
+  self_query: true       # Vectorstore: metadata filter (file / type / page) from the question
+                         # (skipped when the index has a single file and passage type)
 
 # --- Re-ranking (optional) ---
 reranking:

@@ -7,7 +7,8 @@ vector store, retrieval strategies, re-ranking, and generation.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from pathlib import Path
 
 from langchain_core.documents import Document
@@ -18,6 +19,13 @@ from src.config import RAGConfig, load_config
 from src.indexing.loaders.loader import load_documents, _load_from_file
 from src.indexing.chunking import split_documents
 from src.indexing.embeddings import create_embeddings, max_input_tokens
+from src.indexing.multi_representation import (
+    DocStore,
+    SummaryWriter,
+    build_representations,
+    expand_to_parents,
+)
+from src.indexing.raptor import RAPTOR_TYPE, RaptorBuilder
 from src.stores.vectorstore import (
     EmbeddingMismatchError,
     VectorStoreNotReadyError,
@@ -30,12 +38,22 @@ from src.stores.vectorstore import (
     load_vectorstore,
     read_stored_documents,
 )
+from src.stores.graph import GraphExtractor, GraphStore
 from src.stores.relational import RelationalStore, extract_tables
 from src.retrieval.hybrid import HybridRetriever
 from src.retrieval.ranking import Reranker
 from src.query_translation import create_translator
 from src.query_translation.base import QueryTranslator
 from src.query_translation.condense import QuestionCondenser
+from src.routing.logical import GRAPH_DB, RELATIONAL_DB, VECTORSTORE, LogicalRouter
+from src.routing.semantic import SemanticRouter
+from src.query_construction.self_query import (
+    MetadataCatalog,
+    MetadataFilter,
+    SelfQueryConstructor,
+)
+from src.query_construction.text_to_cypher import TextToCypher
+from src.query_construction.text_to_sql import TextToSQL
 from src.generation.generator import (
     SOURCES_HEADER,
     create_llm,
@@ -43,6 +61,15 @@ from src.generation.generator import (
     generate_answer,
     stream_answer,
 )
+
+
+@dataclass
+class Retrieval:
+    question: str
+    search_query: str               # Standalone form of the question
+    documents: list[Document]
+    prompt_name: str = ""           # Chosen by semantic routing
+    route_prompt: str = ""
 
 
 class RAGPipeline:
@@ -69,6 +96,13 @@ class RAGPipeline:
         self._vectorstore = None
         self._base_retriever: HybridRetriever | None = None
         self.relational = RelationalStore(config.relational_db.path)
+        self.graph = GraphStore(config.graph_db.path)
+        self.docstore = DocStore(config.indexing.docstore_path)
+        self._catalog = MetadataCatalog()
+        self._router: LogicalRouter | None = None
+        self._semantic_router: SemanticRouter | None = None
+        # Receives (stage, message, data) for every pipeline step; set by the UI.
+        self._listener: Callable[[str, str, dict], None] | None = None
 
     @classmethod
     def from_config(cls, config_path: str | None = None) -> "RAGPipeline":
@@ -129,30 +163,9 @@ class RAGPipeline:
             print("\n[ERROR] No documents found. Check your config.yaml sources.")
             return
 
-        # 2. Tables → relational DB
-        self._index_tables(documents, rebuild=rebuild)
-
-        # 3. Split into chunks
-        chunks = self._split(documents)
-        if not chunks:
+        if not self._index_documents(documents, rebuild=rebuild):
             print("\n[ERROR] No chunks generated. Check chunking settings.")
             return
-
-        # 4. Embed and store
-        if rebuild:
-            self._vectorstore = build_vectorstore(
-                self.config.vectorstore,
-                self.embeddings,
-                self.config.embedding.signature,
-                documents=chunks,
-            )
-        else:
-            self._open_for_writing()
-            delete_sources(self._vectorstore, {str(c.metadata.get("source", "")) for c in chunks})
-            written = add_documents(self._vectorstore, chunks)
-            total = self._vectorstore._collection.count()
-            print(f"[OK] Indexed {written} chunks ({total} in the vector store)")
-        self._init_retrieval()
 
         print("\n" + "=" * 60)
         print("  [OK] Ingestion complete!")
@@ -192,7 +205,7 @@ class RAGPipeline:
             self.config.vectorstore,
             self.embeddings,
             self.config.embedding.signature,
-            documents=self._split(old_chunks),
+            documents=old_chunks,
         )
 
     def ingest_files(self, file_paths: list[str]) -> str:
@@ -226,19 +239,92 @@ class RAGPipeline:
         if not all_docs:
             return f"Failed to load any documents. Unsupported or unreadable: {', '.join(failed_names)}"
 
-        self._index_tables(all_docs)
-        chunks = self._split(all_docs)
-
-        self._open_for_writing()
-        written = add_documents(self._vectorstore, chunks)
-
-        # Rebuild retrieval (including the keyword index) so new docs are searchable
-        self._init_retrieval()
+        written = self._index_documents(all_docs)
 
         msg = f"Successfully ingested {len(loaded_names)} file(s) ({written} chunks): {', '.join(loaded_names)}"
         if failed_names:
             msg += f"\nFailed: {', '.join(failed_names)}"
         return msg
+
+    def _index_documents(self, documents: list[Document], rebuild: bool = False) -> int:
+        """Index *documents* into every store; returns the vector units written.
+
+        Chunks from the same sources replace their previous versions, so
+        re-running never duplicates them. The pipeline is ready afterwards.
+        """
+        sources = {str(d.metadata.get("source", "")) for d in documents}
+
+        # Tables → relational DB
+        self._index_tables(documents, rebuild=rebuild)
+
+        # Chunk optimization + multi-representation: units → vectorstore, parents → docstore
+        units, parents = self._representations(documents)
+        if not units:
+            return 0
+        if rebuild:
+            self.docstore.reset()
+        self.docstore.delete_sources(sources)
+        self.docstore.put(parents)
+
+        if rebuild:
+            self._vectorstore = build_vectorstore(
+                self.config.vectorstore,
+                self.embeddings,
+                self.config.embedding.signature,
+                documents=units,
+            )
+            written = len(units)
+        else:
+            self._open_for_writing()
+            delete_sources(self._vectorstore, sources)
+            written = add_documents(self._vectorstore, units)
+            total = self._vectorstore._collection.count()
+            print(f"[OK] Indexed {written} chunks ({total} in the vector store)")
+
+        # Entities and relationships → graph DB (parents: fewer, fuller passages)
+        self._index_graph(list(parents.values()) or units, sources, rebuild=rebuild)
+
+        # Hierarchical indexing: RAPTOR summary tree over everything indexed
+        self._build_raptor()
+
+        self._init_retrieval()
+        return written
+
+    def _representations(self, documents: list[Document]) -> tuple[list[Document], dict[str, Document]]:
+        indexing = self.config.indexing
+        summarizer = SummaryWriter(self.llm) if indexing.multi_representation == "summary" else None
+        return build_representations(
+            documents,
+            indexing.multi_representation,
+            split_parents=lambda docs: split_documents(
+                docs, self.config.chunking.model_copy(
+                    update={"chunk_size": indexing.parent_chunk_size, "method": "recursive"}
+                ),
+            ),
+            split_children=self._split,
+            summarizer=summarizer,
+        )
+
+    def _build_raptor(self) -> None:
+        """(Re)build the RAPTOR summary tree over every leaf chunk in the index."""
+        cfg = self.config.indexing.raptor
+        if not cfg.enabled or self._vectorstore is None:
+            return
+        collection = self._vectorstore._collection
+        collection.delete(where={"type": RAPTOR_TYPE})
+        data = collection.get(include=["documents", "metadatas", "embeddings"])
+        leaves, vectors = [], []
+        for text, meta, vector in zip(data["documents"], data["metadatas"], data["embeddings"]):
+            if (meta or {}).get("type") not in (RAPTOR_TYPE, "summary"):
+                leaves.append(Document(page_content=text, metadata=meta or {}))
+                vectors.append(list(vector))
+        if len(leaves) < 2:
+            return
+        print(f"[RAPTOR] Building the summary tree over {len(leaves)} chunk(s)...")
+        builder = RaptorBuilder(self.llm, self.embeddings, cfg.cluster_size, cfg.max_levels)
+        summaries = builder.build(leaves, vectors)
+        if summaries:
+            add_documents(self._vectorstore, summaries)
 
     def _index_tables(self, documents: list[Document], rebuild: bool = False) -> None:
         """Load every table in *documents* into the relational DB (for Text-to-SQL)."""
@@ -251,6 +337,20 @@ class RAGPipeline:
         if names:
             print(f"[SQL] Loaded {len(names)} table(s) into the relational DB: {', '.join(names)}")
 
+    def _index_graph(self, chunks: list[Document], sources: set[str], rebuild: bool = False) -> None:
+        """Extract entity-relationship triples from *chunks* into the graph DB."""
+        if not self.config.graph_db.enabled:
+            return
+        if rebuild:
+            self.graph.reset()
+        self.graph.delete_sources(sources)
+        print(f"[GRAPH] Extracting entities and relationships from {len(chunks)} chunk(s)...")
+        extractor = GraphExtractor(self.llm, self.config.graph_db.extraction_batch_size)
+        added = extractor.build(self.graph, chunks)
+        self.graph.save()
+        print(f"[GRAPH] Added {added} relationship(s) "
+              f"({self.graph.graph.number_of_edges()} in the graph DB)")
+
     def _split(self, documents: list[Document]) -> list[Document]:
         chunking = self.config.chunking
         limit = max_input_tokens(self.embeddings)
@@ -261,7 +361,7 @@ class RAGPipeline:
                 f"model reads (~{limit} tokens); the rest of each chunk will be ignored "
                 "when searching. Lower chunking.chunk_size."
             )
-        return split_documents(documents, chunking)
+        return split_documents(documents, chunking, self.embeddings)
 
     # -----------------------------------------------------------------
     # Loading (for query mode)
@@ -300,9 +400,11 @@ class RAGPipeline:
         )
 
         hybrid = retrieval.hybrid
+        stored = all_documents(self._vectorstore)
+        self._catalog = MetadataCatalog.from_documents(stored)
         self._base_retriever = HybridRetriever(
             self._vectorstore,
-            documents=all_documents(self._vectorstore) if hybrid.enabled else [],
+            documents=stored if hybrid.enabled else [],
             k=per_query_k,
             fetch_k=hybrid.fetch_k,
             rrf_k=hybrid.rrf_k,
@@ -310,57 +412,153 @@ class RAGPipeline:
         )
         self._translator = create_translator(retrieval, self.llm)
 
+    def _emit(self, stage: str, message: str, **data) -> None:
+        """Report a pipeline step to the console and to the active listener (UI)."""
+        print(f"[{stage.upper()}] {message}")
+        if self._listener is not None:
+            self._listener(stage, message, data)
+
     # -----------------------------------------------------------------
     # Query
     # -----------------------------------------------------------------
 
-    def retrieve(self, question: str, chat_history: str = "") -> list[Document]:
-        """Find the chunks to answer *question* with: rewrite → search → rerank → cap."""
+    def available_sources(self) -> dict[str, str]:
+        """Data stores that hold data, with the description the router sees."""
+        sources = {VECTORSTORE: "text passages from the indexed documents"}
+        qc = self.config.query_construction
+        if self.config.relational_db.enabled and qc.text_to_sql:
+            tables = self.relational.table_names()
+            if tables:
+                sources[RELATIONAL_DB] = f"SQL tables extracted from the documents: {', '.join(tables)}"
+        if self.config.graph_db.enabled and qc.text_to_cypher and not self.graph.is_empty:
+            sources[GRAPH_DB] = (
+                f"knowledge graph of {self.graph.graph.number_of_nodes()} entities and "
+                "the relationships between them"
+            )
+        return sources
+
+    def _retrieve(self, question: str, chat_history: str = "") -> Retrieval:
+        """Question → translation → routing → query construction → stores → ranking."""
         if self._base_retriever is None:
             raise RuntimeError("Pipeline not loaded. Call .load() or .ingest() first.")
+        cfg = self.config
 
-        # 1. Make follow-ups standalone so the search sees the full intent
+        # Make follow-ups standalone so every later step sees the full intent
         search_query = question
-        if chat_history and self.config.chat.rewrite_followups:
+        if chat_history and cfg.chat.rewrite_followups:
             if self._condenser is None:
                 self._condenser = QuestionCondenser(self.llm)
             search_query = self._condenser.condense(question, chat_history)
             if search_query != question:
-                print(f"[QUERY] Rewrote follow-up as: {search_query}")
+                self._emit("query_translation", f"Rewrote follow-up as: {search_query}")
 
-        # 2. Query translation, then search with every query and fuse
+        # 1. Query translation
         queries = self._translator.translate(search_query)
-        documents = self._translator.fuse([self._base_retriever.invoke(q) for q in queries])
+        noun = "query" if len(queries) == 1 else "queries"
+        self._emit(
+            "query_translation",
+            f"{self._translator.name}: searching with {len(queries)} {noun}",
+            queries=queries,
+        )
 
-        # 3. Re-rank a candidate pool, or just keep the best top_k
-        if self._reranker is not None and self._reranker.enabled:
-            candidates = documents[: self.config.reranking.candidates]
-            return self._reranker.rerank(search_query, candidates)
-        return documents[: self.config.retrieval.top_k]
+        # 2. Routing
+        available = self.available_sources()
+        if cfg.routing.logical and len(available) > 1:
+            if self._router is None:
+                self._router = LogicalRouter(self.llm)
+            datasources = self._router.route(search_query, available)
+        else:
+            datasources = list(available)
+        self._emit("routing", f"Logical routing → {', '.join(datasources)}", datasources=datasources)
+
+        prompt_name, route_prompt = "", ""
+        if cfg.routing.semantic and cfg.routing.prompts:
+            if self._semantic_router is None:
+                self._semantic_router = SemanticRouter(self.embeddings, {
+                    name: (r.description, r.prompt) for name, r in cfg.routing.prompts.items()
+                })
+            prompt_name, route_prompt, score = self._semantic_router.route(search_query)
+            self._emit(
+                "routing",
+                f"Semantic routing → {prompt_name} prompt (similarity {score:.2f})",
+                prompt=prompt_name,
+            )
+
+        # 3. Query construction, one per routed data store
+        structured: list[Document] = []
+        if RELATIONAL_DB in datasources:
+            sql, docs = TextToSQL(self.llm, self.relational, cfg.relational_db.max_rows).run(search_query)
+            self._emit(
+                "query_construction",
+                f"Text-to-SQL: {sql}" if docs else "Text-to-SQL found no answer in the tables",
+                sql=sql,
+            )
+            structured += docs
+        if GRAPH_DB in datasources:
+            cypher, docs = TextToCypher(self.llm, self.graph, cfg.graph_db.max_results).run(search_query)
+            if docs:
+                message = f"Text-to-Cypher: {cypher}" if cypher else "Graph DB: facts around the entities mentioned"
+            else:
+                message = "Text-to-Cypher found nothing in the graph"
+            self._emit("query_construction", message, cypher=cypher)
+            structured += docs
+
+        passages: list[Document] = []
+        if VECTORSTORE in datasources or not structured:
+            metadata_filter = MetadataFilter()
+            if cfg.query_construction.self_query and self._catalog.filterable:
+                metadata_filter = SelfQueryConstructor(self.llm).construct(search_query, self._catalog)
+                self._emit(
+                    "query_construction",
+                    f"Self-query filter: {metadata_filter.describe()}" if metadata_filter
+                    else "Self-query: no metadata filter needed",
+                )
+            passages = self._search(queries, metadata_filter)
+
+        # 4. Retrieval: rank the passages, keep the best
+        if self._reranker is not None and self._reranker.enabled and passages:
+            passages = self._reranker.rerank(search_query, passages[: cfg.reranking.candidates])
+            self._emit("retrieval", f"Re-ranked with {cfg.reranking.provider} → kept {len(passages)}")
+        else:
+            passages = passages[: cfg.retrieval.top_k]
+        if cfg.indexing.multi_representation != "none":
+            passages = expand_to_parents(passages, self.docstore)
+
+        documents = structured + passages
+        self._emit("retrieval", f"{len(documents)} document(s) retrieved")
+        return Retrieval(question, search_query, documents, prompt_name, route_prompt)
+
+    def _search(self, queries: list[str], metadata_filter=None) -> list[Document]:
+        """Vectorstore search for every query, fused by the translator."""
+        results = [self._base_retriever.invoke(q, metadata_filter) for q in queries]
+        if metadata_filter and not any(results):
+            print("[INFO] The metadata filter matched nothing; searching everything.")
+            results = [self._base_retriever.invoke(q) for q in queries]
+        return self._translator.fuse(results)
+
+    def retrieve(self, question: str, chat_history: str = "") -> list[Document]:
+        """Find the documents to answer *question* with."""
+        return self._retrieve(question, chat_history).documents
+
+    def _system_prompt(self, retrieval: Retrieval) -> str:
+        prompt = self.config.chat.system_prompt
+        return f"{prompt.strip()}\n\n{retrieval.route_prompt}" if retrieval.route_prompt else prompt
 
     def query(
         self,
         question: str,
         chat_history: str = "",
     ) -> tuple[str, list[Document]]:
-        """Run the full RAG query pipeline.
-
-        Args:
-            question: The user's question.
-            chat_history: Optional formatted conversation history.
-
-        Returns:
-            (answer, source_documents)
-        """
-        documents = self.retrieve(question, chat_history)
+        """Run the full RAG query pipeline and return (answer, source_documents)."""
+        retrieval = self._retrieve(question, chat_history)
         answer = generate_answer(
             llm=self.llm,
             question=question,
-            documents=documents,
+            documents=retrieval.documents,
             chat_history=chat_history,
-            system_prompt=self.config.chat.system_prompt,
+            system_prompt=self._system_prompt(retrieval),
         )
-        return answer, documents
+        return answer, retrieval.documents
 
     def stream_query(
         self,
@@ -368,15 +566,15 @@ class RAGPipeline:
         chat_history: str = "",
     ) -> tuple[Iterator[str], list[Document]]:
         """Retrieve now, and return an iterator that streams the answer."""
-        documents = self.retrieve(question, chat_history)
+        retrieval = self._retrieve(question, chat_history)
         stream = stream_answer(
             llm=self.llm,
             question=question,
-            documents=documents,
+            documents=retrieval.documents,
             chat_history=chat_history,
-            system_prompt=self.config.chat.system_prompt,
+            system_prompt=self._system_prompt(retrieval),
         )
-        return stream, documents
+        return stream, retrieval.documents
 
     def format_response(
         self, answer: str, documents: list[Document]

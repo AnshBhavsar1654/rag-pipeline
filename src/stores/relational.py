@@ -13,6 +13,7 @@ from __future__ import annotations
 import csv
 import re
 import sqlite3
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -117,7 +118,7 @@ class RelationalStore:
     def __init__(self, path: str | Path):
         self.path = Path(path)
 
-    def _connect(self, readonly: bool = False) -> sqlite3.Connection:
+    def _open(self, readonly: bool = False) -> sqlite3.Connection:
         if readonly:
             return sqlite3.connect(f"file:{self.path.as_posix()}?mode=ro", uri=True)
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -127,6 +128,16 @@ class RelationalStore:
             "(table_name TEXT PRIMARY KEY, source TEXT, page INTEGER, columns TEXT)"
         )
         return conn
+
+    @contextmanager
+    def _connect(self, readonly: bool = False):
+        """Connection that commits on success and is always closed (Windows locks open files)."""
+        conn = self._open(readonly)
+        try:
+            yield conn
+            conn.commit()
+        finally:
+            conn.close()
 
     # -- writing ------------------------------------------------------------
 
