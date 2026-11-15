@@ -37,6 +37,14 @@ vectorstore:
   persist_directory: "./vectorstore_db"
   collection_name: "rag_collection"
 
+# --- Relational DB ---
+# Tables found in PDFs/DOCX and CSV files are loaded into SQLite and queried
+# with Text-to-SQL when the router decides a question needs them.
+relational_db:
+  enabled: true
+  path: "./data/relational.sqlite"
+  max_rows: 50              # Rows of a SQL result passed to the LLM
+
 # --- LLM ---
 llm:
   provider: "google"         # google | groq | openai | ollama

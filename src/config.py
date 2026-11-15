@@ -51,6 +51,13 @@ class VectorStoreConfig(BaseModel):
     collection_name: str = "rag_collection"
 
 
+class RelationalDBConfig(BaseModel):
+    """SQLite database holding every extracted table (Text-to-SQL target)."""
+    enabled: bool = True
+    path: str = "./data/relational.sqlite"
+    max_rows: int = 50          # Rows of a SQL result passed to the LLM
+
+
 class LLMConfig(BaseModel):
     provider: Literal["openai", "groq", "google", "ollama"] = "google"
     model: str = "gemini-3.6-flash"
@@ -144,6 +151,7 @@ class RAGConfig(BaseModel):
     chunking: ChunkingConfig = Field(default_factory=ChunkingConfig)
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
     vectorstore: VectorStoreConfig = Field(default_factory=VectorStoreConfig)
+    relational_db: RelationalDBConfig = Field(default_factory=RelationalDBConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
     reranking: RerankingConfig = Field(default_factory=RerankingConfig)

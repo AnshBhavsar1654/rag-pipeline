@@ -21,6 +21,7 @@ env/
 # Vector store / cached data
 vectorstore_db/
 vectorstore_db.backup-*/
+data/
 
 # IDE
 .vscode/

@@ -30,6 +30,7 @@ from src.stores.vectorstore import (
     load_vectorstore,
     read_stored_documents,
 )
+from src.stores.relational import RelationalStore, extract_tables
 from src.retrieval.hybrid import HybridRetriever
 from src.retrieval.ranking import Reranker
 from src.query_translation import create_translator
@@ -67,6 +68,7 @@ class RAGPipeline:
         self._condenser: QuestionCondenser | None = None
         self._vectorstore = None
         self._base_retriever: HybridRetriever | None = None
+        self.relational = RelationalStore(config.relational_db.path)
 
     @classmethod
     def from_config(cls, config_path: str | None = None) -> "RAGPipeline":
@@ -127,13 +129,16 @@ class RAGPipeline:
             print("\n[ERROR] No documents found. Check your config.yaml sources.")
             return
 
-        # 2. Split into chunks
+        # 2. Tables → relational DB
+        self._index_tables(documents, rebuild=rebuild)
+
+        # 3. Split into chunks
         chunks = self._split(documents)
         if not chunks:
             print("\n[ERROR] No chunks generated. Check chunking settings.")
             return
 
-        # 3. Embed and store
+        # 4. Embed and store
         if rebuild:
             self._vectorstore = build_vectorstore(
                 self.config.vectorstore,
@@ -221,6 +226,7 @@ class RAGPipeline:
         if not all_docs:
             return f"Failed to load any documents. Unsupported or unreadable: {', '.join(failed_names)}"
 
+        self._index_tables(all_docs)
         chunks = self._split(all_docs)
 
         self._open_for_writing()
@@ -233,6 +239,17 @@ class RAGPipeline:
         if failed_names:
             msg += f"\nFailed: {', '.join(failed_names)}"
         return msg
+
+    def _index_tables(self, documents: list[Document], rebuild: bool = False) -> None:
+        """Load every table in *documents* into the relational DB (for Text-to-SQL)."""
+        if not self.config.relational_db.enabled:
+            return
+        if rebuild:
+            self.relational.reset()
+        self.relational.delete_sources({str(d.metadata.get("source", "")) for d in documents})
+        names = self.relational.add_tables(extract_tables(documents))
+        if names:
+            print(f"[SQL] Loaded {len(names)} table(s) into the relational DB: {', '.join(names)}")
 
     def _split(self, documents: list[Document]) -> list[Document]:
         chunking = self.config.chunking
