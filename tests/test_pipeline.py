@@ -7,7 +7,7 @@ from langchain_core.documents import Document
 from langchain_core.embeddings import DeterministicFakeEmbedding
 from langchain_core.language_models import FakeListChatModel
 
-from src.chat.chatbot import format_history, messages_from_gradio
+from src.chat.chatbot import format_history, messages_from_dicts
 from src.config import RAGConfig
 from src.generation.generator import SOURCES_HEADER, generate_answer
 from src.pipeline.rag_pipeline import RAGPipeline
@@ -48,8 +48,9 @@ def config(tmp_path):
         relational_db={"path": str(tmp_path / "rel.sqlite")},
         graph_db={"enabled": False, "path": str(tmp_path / "graph.json")},
         indexing={"docstore_path": str(tmp_path / "docstore.sqlite"), "raptor": {"enabled": False}},
-        retrieval={"strategy": "simple", "top_k": 3},
+        retrieval={"strategy": "simple", "top_k": 3, "crag": {"enabled": False}},
         reranking={"enabled": False},
+        generation={"self_rag": {"enabled": False}},
         extraction={"enabled": False},
     )
 
@@ -218,6 +219,7 @@ def test_follow_up_is_rewritten_before_search(config, embeddings, monkeypatch):
         pipeline._translator, "translate", lambda q: searched.append(q) or original(q)
     )
 
+
     answer, _ = pipeline.query("How often?", chat_history="Human: Tell me about the filter")
     assert searched == ["How often should the Zorblax-9 filter be cleaned?"]
     assert answer == "Every 30 days [1]."
@@ -234,13 +236,59 @@ def test_system_prompt_with_braces_does_not_break_template():
 
 # --- chat -------------------------------------------------------------------
 
-def test_gradio_history_drops_source_lists_and_respects_window():
+def test_ui_history_drops_source_lists_and_respects_window():
     history = [
         {"role": "user", "content": "q1"},
         {"role": "assistant", "content": f"a1\n\n{SOURCES_HEADER}\n- **[1]** x.md"},
         {"role": "user", "content": "q2"},
         {"role": "assistant", "content": [{"type": "text", "text": "a2"}]},
     ]
-    messages = messages_from_gradio(history)
+    messages = messages_from_dicts(history)
     assert [m.content for m in messages] == ["q1", "a1", "q2", "a2"]
     assert format_history(messages, memory_window=1) == "Human: q2\nAssistant: a2"
+
+
+# --- retrieval refinement and generation checks ----------------------------
+
+def test_crag_drops_irrelevant_documents_and_re_retrieves(config, embeddings, monkeypatch):
+    config.retrieval.crag.enabled = True
+    config.indexing.multi_representation = "none"
+    web_doc = Document(page_content="Filters: clean monthly.", metadata={"source": "https://x.test"})
+    monkeypatch.setattr("src.pipeline.rag_pipeline.web_search", lambda q, n: [web_doc])
+    # grade: nothing relevant → rewrite → grade the web result: keep #1 → answer
+    pipeline = make_pipeline(
+        config, embeddings,
+        llm_responses=["none", "Zorblax-9 intake filter cleaning", "1", "Every 30 days [1]."],
+    )
+    pipeline.ingest()
+    events = list(pipeline.run("filter?"))
+    steps = [e.message for e in events if e.kind == "step"]
+    assert any("CRAG active retrieval" in m for m in steps)
+    done = events[-1]
+    assert done.kind == "done" and done.documents == [web_doc]
+    assert done.answer == "Every 30 days [1]."
+
+
+def test_self_rag_regenerates_an_ungrounded_answer(config, embeddings):
+    config.generation.self_rag.enabled = True
+    pipeline = make_pipeline(
+        config, embeddings,
+        llm_responses=[
+            "It weighs 9 tons.",
+            '{"grounded": "no", "answers_question": "yes"}',
+            "It weighs 340 grams [1].",
+            '{"grounded": "yes", "answers_question": "yes"}',
+        ],
+    )
+    pipeline.ingest()
+    events = list(pipeline.run("How heavy is the Zorblax-9?"))
+    assert [e.kind for e in events].count("reset") == 1
+    assert events[-1].answer == "It weighs 340 grams [1]."
+
+
+def test_parent_documents_replace_child_chunks(config, embeddings):
+    pipeline = make_pipeline(config, embeddings)
+    pipeline.ingest()
+    docs = pipeline.retrieve("Zorblax-9 filter")
+    # children are 40 tokens; the parent holds the whole short file
+    assert any("12 volt" in d.page_content and "isopropyl" in d.page_content for d in docs)

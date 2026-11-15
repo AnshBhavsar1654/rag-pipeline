@@ -7,8 +7,8 @@ vector store, retrieval strategies, re-ranking, and generation.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
-from dataclasses import dataclass
+from collections.abc import Generator, Iterator
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from langchain_core.documents import Document
@@ -41,7 +41,10 @@ from src.stores.vectorstore import (
 from src.stores.graph import GraphExtractor, GraphStore
 from src.stores.relational import RelationalStore, extract_tables
 from src.retrieval.hybrid import HybridRetriever
+from src.retrieval.active import QueryRewriter, web_search
 from src.retrieval.ranking import Reranker
+from src.retrieval.refinement import RelevanceGrader
+from src.retrieval.utils import doc_key
 from src.query_translation import create_translator
 from src.query_translation.base import QueryTranslator
 from src.query_translation.condense import QuestionCondenser
@@ -58,18 +61,38 @@ from src.generation.generator import (
     SOURCES_HEADER,
     create_llm,
     format_sources,
-    generate_answer,
     stream_answer,
 )
+from src.generation.self_rag import AnswerGrader
 
 
 @dataclass
 class Retrieval:
-    question: str
     search_query: str               # Standalone form of the question
     documents: list[Document]
     prompt_name: str = ""           # Chosen by semantic routing
     route_prompt: str = ""
+
+
+@dataclass
+class Event:
+    """One thing that happened while answering, streamed to the UI and CLI."""
+    kind: str                       # step | token | reset | done
+    stage: str = ""                 # query_translation | routing | query_construction | retrieval | generation
+    message: str = ""
+    text: str = ""
+    data: dict = field(default_factory=dict)
+    answer: str = ""
+    documents: list[Document] = field(default_factory=list)
+
+
+def _drain(steps: Generator):
+    """Exhaust a step generator and return its return value."""
+    while True:
+        try:
+            next(steps)
+        except StopIteration as stop:
+            return stop.value
 
 
 class RAGPipeline:
@@ -101,8 +124,9 @@ class RAGPipeline:
         self._catalog = MetadataCatalog()
         self._router: LogicalRouter | None = None
         self._semantic_router: SemanticRouter | None = None
-        # Receives (stage, message, data) for every pipeline step; set by the UI.
-        self._listener: Callable[[str, str, dict], None] | None = None
+        self._relevance_grader: RelevanceGrader | None = None
+        self._query_rewriter: QueryRewriter | None = None
+        self._answer_grader: AnswerGrader | None = None
 
     @classmethod
     def from_config(cls, config_path: str | None = None) -> "RAGPipeline":
@@ -386,11 +410,14 @@ class RAGPipeline:
         print(f"[STRAT] Retrieval strategy: {self.strategy_name}")
         print("[OK] Pipeline ready!\n")
 
+    def _llm_if_needed(self):
+        return self.llm if self.config.reranking.provider == "rankgpt" else None
+
     def _init_retrieval(self) -> None:
         retrieval = self.config.retrieval
 
         if self._reranker is None:
-            self._reranker = Reranker(self.config.reranking)
+            self._reranker = Reranker(self.config.reranking, llm=self._llm_if_needed())
 
         # When reranking, give it a wider candidate pool to choose from.
         per_query_k = (
@@ -412,11 +439,11 @@ class RAGPipeline:
         )
         self._translator = create_translator(retrieval, self.llm)
 
-    def _emit(self, stage: str, message: str, **data) -> None:
-        """Report a pipeline step to the console and to the active listener (UI)."""
+    @staticmethod
+    def _step(stage: str, message: str, **data) -> Event:
+        """A pipeline step, logged to the console and yielded to the caller (UI/CLI)."""
         print(f"[{stage.upper()}] {message}")
-        if self._listener is not None:
-            self._listener(stage, message, data)
+        return Event("step", stage=stage, message=message, data=data)
 
     # -----------------------------------------------------------------
     # Query
@@ -437,25 +464,30 @@ class RAGPipeline:
             )
         return sources
 
-    def _retrieve(self, question: str, chat_history: str = "") -> Retrieval:
-        """Question → translation → routing → query construction → stores → ranking."""
+    def _condense(self, question: str, chat_history: str) -> Iterator[Event]:
+        """Make a follow-up standalone so every later step sees the full intent."""
+        if not chat_history or not self.config.chat.rewrite_followups:
+            return question
+        if self._condenser is None:
+            self._condenser = QuestionCondenser(self.llm)
+        search_query = self._condenser.condense(question, chat_history)
+        if search_query != question:
+            yield self._step("query_translation", f"Rewrote follow-up as: {search_query}")
+        return search_query
+
+    def _retrieve(self, search_query: str) -> Iterator[Event]:
+        """Translation → routing → query construction → stores → ranking → CRAG.
+
+        A generator of step events whose return value is the Retrieval.
+        """
         if self._base_retriever is None:
             raise RuntimeError("Pipeline not loaded. Call .load() or .ingest() first.")
         cfg = self.config
 
-        # Make follow-ups standalone so every later step sees the full intent
-        search_query = question
-        if chat_history and cfg.chat.rewrite_followups:
-            if self._condenser is None:
-                self._condenser = QuestionCondenser(self.llm)
-            search_query = self._condenser.condense(question, chat_history)
-            if search_query != question:
-                self._emit("query_translation", f"Rewrote follow-up as: {search_query}")
-
         # 1. Query translation
         queries = self._translator.translate(search_query)
         noun = "query" if len(queries) == 1 else "queries"
-        self._emit(
+        yield self._step(
             "query_translation",
             f"{self._translator.name}: searching with {len(queries)} {noun}",
             queries=queries,
@@ -469,7 +501,7 @@ class RAGPipeline:
             datasources = self._router.route(search_query, available)
         else:
             datasources = list(available)
-        self._emit("routing", f"Logical routing → {', '.join(datasources)}", datasources=datasources)
+        yield self._step("routing", f"Logical routing → {', '.join(datasources)}", datasources=datasources)
 
         prompt_name, route_prompt = "", ""
         if cfg.routing.semantic and cfg.routing.prompts:
@@ -478,7 +510,7 @@ class RAGPipeline:
                     name: (r.description, r.prompt) for name, r in cfg.routing.prompts.items()
                 })
             prompt_name, route_prompt, score = self._semantic_router.route(search_query)
-            self._emit(
+            yield self._step(
                 "routing",
                 f"Semantic routing → {prompt_name} prompt (similarity {score:.2f})",
                 prompt=prompt_name,
@@ -488,10 +520,10 @@ class RAGPipeline:
         structured: list[Document] = []
         if RELATIONAL_DB in datasources:
             sql, docs = TextToSQL(self.llm, self.relational, cfg.relational_db.max_rows).run(search_query)
-            self._emit(
+            yield self._step(
                 "query_construction",
                 f"Text-to-SQL: {sql}" if docs else "Text-to-SQL found no answer in the tables",
-                sql=sql,
+                sql=sql, store=RELATIONAL_DB,
             )
             structured += docs
         if GRAPH_DB in datasources:
@@ -500,7 +532,7 @@ class RAGPipeline:
                 message = f"Text-to-Cypher: {cypher}" if cypher else "Graph DB: facts around the entities mentioned"
             else:
                 message = "Text-to-Cypher found nothing in the graph"
-            self._emit("query_construction", message, cypher=cypher)
+            yield self._step("query_construction", message, cypher=cypher, store=GRAPH_DB)
             structured += docs
 
         passages: list[Document] = []
@@ -508,25 +540,44 @@ class RAGPipeline:
             metadata_filter = MetadataFilter()
             if cfg.query_construction.self_query and self._catalog.filterable:
                 metadata_filter = SelfQueryConstructor(self.llm).construct(search_query, self._catalog)
-                self._emit(
+                yield self._step(
                     "query_construction",
                     f"Self-query filter: {metadata_filter.describe()}" if metadata_filter
                     else "Self-query: no metadata filter needed",
+                    store=VECTORSTORE,
                 )
             passages = self._search(queries, metadata_filter)
+            yield self._step("query_construction", f"Vectorstore: {len(passages)} candidate passage(s)",
+                             store=VECTORSTORE)
 
-        # 4. Retrieval: rank the passages, keep the best
+        # 4. Retrieval: ranking
+        passages = self._rank(search_query, passages)
         if self._reranker is not None and self._reranker.enabled and passages:
-            passages = self._reranker.rerank(search_query, passages[: cfg.reranking.candidates])
-            self._emit("retrieval", f"Re-ranked with {cfg.reranking.provider} → kept {len(passages)}")
-        else:
-            passages = passages[: cfg.retrieval.top_k]
-        if cfg.indexing.multi_representation != "none":
-            passages = expand_to_parents(passages, self.docstore)
-
+            yield self._step("retrieval", f"Re-ranked with {cfg.reranking.provider} → kept the best {len(passages)}")
         documents = structured + passages
-        self._emit("retrieval", f"{len(documents)} document(s) retrieved")
-        return Retrieval(question, search_query, documents, prompt_name, route_prompt)
+
+        # 5. Retrieval: refinement and active retrieval (CRAG)
+        crag = cfg.retrieval.crag
+        if crag.enabled and documents:
+            verdicts = self._grader().grade(search_query, documents)
+            relevant = [d for d, ok in zip(documents, verdicts) if ok]
+            yield self._step("retrieval", f"CRAG: {len(relevant)}/{len(documents)} document(s) relevant")
+            if len(relevant) < crag.min_relevant:
+                new_query = self._rewriter().rewrite(search_query)
+                where = "the vectorstore" + (" and the web" if crag.web_search else "")
+                yield self._step("retrieval", f"CRAG active retrieval: searching {where} for: {new_query}")
+                seen = {doc_key(d) for d in documents}
+                extra = [d for d in self._rank(new_query, self._search([new_query])) if doc_key(d) not in seen]
+                if crag.web_search:
+                    extra += web_search(new_query, crag.web_results)
+                verdicts = self._grader().grade(search_query, extra)
+                found = [d for d, ok in zip(extra, verdicts) if ok]
+                yield self._step("retrieval", f"CRAG: {len(found)}/{len(extra)} new document(s) relevant")
+                relevant += found
+            documents = relevant
+
+        yield self._step("retrieval", f"{len(documents)} document(s) passed to the LLM")
+        return Retrieval(search_query, documents, prompt_name, route_prompt)
 
     def _search(self, queries: list[str], metadata_filter=None) -> list[Document]:
         """Vectorstore search for every query, fused by the translator."""
@@ -536,13 +587,91 @@ class RAGPipeline:
             results = [self._base_retriever.invoke(q) for q in queries]
         return self._translator.fuse(results)
 
+    def _rank(self, query: str, passages: list[Document]) -> list[Document]:
+        """Re-rank (or cap) the candidates, then swap retrieval units for their parents."""
+        if self._reranker is not None and self._reranker.enabled and passages:
+            passages = self._reranker.rerank(query, passages[: self.config.reranking.candidates])
+        else:
+            passages = passages[: self.config.retrieval.top_k]
+        if self.config.indexing.multi_representation != "none":
+            passages = expand_to_parents(passages, self.docstore)
+        return passages
+
+    def _grader(self) -> RelevanceGrader:
+        if self._relevance_grader is None:
+            self._relevance_grader = RelevanceGrader(self.llm)
+        return self._relevance_grader
+
+    def _rewriter(self) -> QueryRewriter:
+        if self._query_rewriter is None:
+            self._query_rewriter = QueryRewriter(self.llm)
+        return self._query_rewriter
+
     def retrieve(self, question: str, chat_history: str = "") -> list[Document]:
         """Find the documents to answer *question* with."""
-        return self._retrieve(question, chat_history).documents
+        def steps():
+            search_query = yield from self._condense(question, chat_history)
+            return (yield from self._retrieve(search_query))
+        return _drain(steps()).documents
 
     def _system_prompt(self, retrieval: Retrieval) -> str:
         prompt = self.config.chat.system_prompt
         return f"{prompt.strip()}\n\n{retrieval.route_prompt}" if retrieval.route_prompt else prompt
+
+    def run(self, question: str, chat_history: str = "") -> Iterator[Event]:
+        """Run the whole pipeline, yielding events as it goes.
+
+        Events: ``step`` (stage + message), ``token`` (answer text),
+        ``reset`` (Self-RAG discarded the answer streamed so far) and a final
+        ``done`` carrying the answer and its source documents.
+        """
+        search_query = yield from self._condense(question, chat_history)
+        retrieval = yield from self._retrieve(search_query)
+
+        self_rag = self.config.generation.self_rag
+        extra_rule = ""
+        answer = ""
+        for attempt in range(1 + (self_rag.max_retries if self_rag.enabled else 0)):
+            answer = ""
+            for piece in stream_answer(
+                llm=self.llm,
+                question=question,
+                documents=retrieval.documents,
+                chat_history=chat_history,
+                system_prompt=self._system_prompt(retrieval) + extra_rule,
+            ):
+                answer += piece
+                yield Event("token", text=piece)
+
+            if not self_rag.enabled:
+                break
+            if self._answer_grader is None:
+                self._answer_grader = AnswerGrader(self.llm)
+            check = self._answer_grader.check(question, retrieval.documents, answer)
+            yield self._step(
+                "generation",
+                f"Self-RAG: grounded={'yes' if check.grounded else 'no'}, "
+                f"answers the question={'yes' if check.answers_question else 'no'}",
+            )
+            if check.ok or attempt == self_rag.max_retries:
+                break
+
+            yield Event("reset")
+            if not check.answers_question:
+                # RRR: rewrite the question and re-retrieve before reading again
+                new_query = self._rewriter().rewrite(
+                    retrieval.search_query, hint="The previous search did not find what was needed.",
+                )
+                yield self._step("generation", f"Self-RAG re-retrieval with: {new_query}")
+                retrieval = yield from self._retrieve(new_query)
+            else:
+                yield self._step("generation", "Self-RAG: regenerating a strictly grounded answer")
+                extra_rule = (
+                    "\n\nYour previous answer contained claims the passages do not support. "
+                    "State only what the passages say."
+                )
+
+        yield Event("done", answer=answer, documents=retrieval.documents)
 
     def query(
         self,
@@ -550,31 +679,8 @@ class RAGPipeline:
         chat_history: str = "",
     ) -> tuple[str, list[Document]]:
         """Run the full RAG query pipeline and return (answer, source_documents)."""
-        retrieval = self._retrieve(question, chat_history)
-        answer = generate_answer(
-            llm=self.llm,
-            question=question,
-            documents=retrieval.documents,
-            chat_history=chat_history,
-            system_prompt=self._system_prompt(retrieval),
-        )
-        return answer, retrieval.documents
-
-    def stream_query(
-        self,
-        question: str,
-        chat_history: str = "",
-    ) -> tuple[Iterator[str], list[Document]]:
-        """Retrieve now, and return an iterator that streams the answer."""
-        retrieval = self._retrieve(question, chat_history)
-        stream = stream_answer(
-            llm=self.llm,
-            question=question,
-            documents=retrieval.documents,
-            chat_history=chat_history,
-            system_prompt=self._system_prompt(retrieval),
-        )
-        return stream, retrieval.documents
+        done = [e for e in self.run(question, chat_history) if e.kind == "done"][-1]
+        return done.answer, done.documents
 
     def format_response(
         self, answer: str, documents: list[Document]

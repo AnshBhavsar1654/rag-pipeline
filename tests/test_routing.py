@@ -101,3 +101,25 @@ def test_self_query_keeps_only_known_values():
     assert flt.conditions == {"source": ["/x/report.pdf"], "type": ["table"]}
     assert flt.to_chroma() == {"$and": [{"source": "/x/report.pdf"}, {"type": "table"}]}
     assert flt.matches(docs[0].metadata) is False
+
+
+def test_rankgpt_ranking_parser_appends_missing():
+    from src.retrieval.ranking import parse_ranking
+    assert parse_ranking("[3] > [1]", 4) == [2, 0, 1, 3]
+
+
+def test_relevance_parser():
+    from src.retrieval.refinement import parse_relevant
+    assert parse_relevant("1, 3", 3) == [True, False, True]
+    assert parse_relevant("none", 2) == [False, False]
+
+
+def test_raptor_builds_levels_until_one_summary():
+    from langchain_core.embeddings import DeterministicFakeEmbedding
+    from src.indexing.raptor import RaptorBuilder
+
+    leaves = [Document(page_content=f"passage {i}") for i in range(10)]
+    llm = FakeListChatModel(responses=["summary"])
+    summaries = RaptorBuilder(llm, DeterministicFakeEmbedding(size=8), cluster_size=4).build(leaves)
+    levels = [d.metadata["raptor_level"] for d in summaries]
+    assert levels[0] == 1 and levels[-1] == max(levels) and levels.count(max(levels)) == 1

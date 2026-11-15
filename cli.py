@@ -1,7 +1,9 @@
 """
 RAG Pipeline — CLI Chatbot
 
-Interactive terminal chatbot for the RAG pipeline.
+Interactive terminal chatbot for the RAG pipeline. Each pipeline step
+(query translation, routing, query construction, retrieval, generation)
+is printed as it happens, then the answer streams in.
 
 Usage:
     python cli.py
@@ -27,18 +29,16 @@ def main():
     from src.pipeline.rag_pipeline import RAGPipeline
     from src.chat.chatbot import RAGChatbot
 
-    # Initialize
     try:
         pipeline = RAGPipeline.from_config(args.config)
         pipeline.load()
     except FileNotFoundError as e:
         print(f"\n[ERROR] {e}")
-        print("[TIP] Run `python ingest.py` first to build the vector store.")
+        print("[TIP] Run `python ingest.py` first to build the index.")
         sys.exit(1)
 
     chatbot = RAGChatbot(pipeline)
 
-    # Chat loop
     print("\n" + "=" * 60)
     print("  [CHAT] RAG Chatbot — CLI Mode")
     print("  Type your questions below. Commands:")
@@ -55,23 +55,30 @@ def main():
 
         if not user_input:
             continue
-
         if user_input.lower() in ("/quit", "/exit", "quit", "exit"):
             print("\n[BYE] Goodbye!")
             break
-
         if user_input.lower() in ("/clear", "clear"):
             chatbot.clear_history()
             print("[CLR]  Conversation history cleared.\n")
             continue
 
-        # Get response
-        print("\n[THINK] Thinking...\n")
+        print()
         try:
-            print("Assistant: ", end="", flush=True)
-            for piece in chatbot.stream_chat(user_input):
-                print(piece, end="", flush=True)
-            print("\n")
+            streaming = False
+            for event in chatbot.events(user_input):
+                if event.kind == "token":
+                    if not streaming:
+                        print("\nAssistant: ", end="", flush=True)
+                        streaming = True
+                    print(event.text, end="", flush=True)
+                elif event.kind == "reset":
+                    print("\n\n[Self-RAG] Discarding that answer and trying again...")
+                    streaming = False
+                elif event.kind == "done":
+                    sources = pipeline.format_response("", event.documents)
+                    print(f"\n{sources}\n" if sources else "\n")
+                # step events are already printed by the pipeline
         except Exception as e:
             print(f"\n[ERROR] Error: {e}\n")
 

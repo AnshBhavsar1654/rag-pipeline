@@ -119,6 +119,14 @@ retrieval:
   hyde:
     hypothesis_prompt: "Please write a detailed passage to answer the question:\nQuestion: {question}\nPassage:"
 
+  # CRAG: grade retrieved documents for relevance and drop the rest; when too
+  # few are relevant, rewrite the query and search again (+ the web).
+  crag:
+    enabled: true
+    min_relevant: 1
+    web_search: true         # DuckDuckGo, no API key
+    web_results: 4
+
 # --- Routing ---
 routing:
   logical: true      # LLM picks the data store(s): vectorstore / relational_db / graph_db
@@ -151,13 +159,21 @@ query_construction:
 # --- Re-ranking (optional) ---
 reranking:
   enabled: true
-  provider: "cross_encoder"  # cross_encoder | cohere
+  provider: "cross_encoder"  # cross_encoder | cohere | rankgpt | colbert
   model: "cross-encoder/ms-marco-MiniLM-L-6-v2"
   candidates: 20            # Retrieved chunks the re-ranker scores
   top_k: 5                  # Chunks passed to the LLM after re-ranking
   # For Cohere:
   # provider: "cohere"
   # model: "rerank-english-v3.0"
+
+# --- Generation ---
+generation:
+  # Self-RAG / RRR: check the answer is grounded in the documents and answers
+  # the question; regenerate, or rewrite the question and re-retrieve, if not.
+  self_rag:
+    enabled: true
+    max_retries: 1
 
 # --- Image/Table Extraction ---
 extraction:

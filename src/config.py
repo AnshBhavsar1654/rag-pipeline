@@ -118,6 +118,14 @@ class HybridConfig(BaseModel):
     rrf_k: int = 60
 
 
+class CRAGConfig(BaseModel):
+    """Corrective RAG: grade documents, re-retrieve when too few are relevant."""
+    enabled: bool = True
+    min_relevant: int = 1       # Fewer relevant documents than this triggers re-retrieval
+    web_search: bool = True     # Also search the web (DuckDuckGo) when re-retrieving
+    web_results: int = 4
+
+
 class RetrievalConfig(BaseModel):
     strategy: Literal[
         "simple", "multi_query", "rag_fusion", "hyde", "step_back", "decomposition"
@@ -127,6 +135,7 @@ class RetrievalConfig(BaseModel):
     multi_query: MultiQueryConfig = Field(default_factory=MultiQueryConfig)
     rag_fusion: RAGFusionConfig = Field(default_factory=RAGFusionConfig)
     hyde: HyDEConfig = Field(default_factory=HyDEConfig)
+    crag: CRAGConfig = Field(default_factory=CRAGConfig)
 
 
 class PromptRoute(BaseModel):
@@ -174,10 +183,20 @@ class QueryConstructionConfig(BaseModel):
 
 class RerankingConfig(BaseModel):
     enabled: bool = False
-    provider: Literal["cross_encoder", "cohere"] = "cross_encoder"
+    provider: Literal["cross_encoder", "cohere", "rankgpt", "colbert"] = "cross_encoder"
     model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
     candidates: int = 20    # How many retrieved chunks the reranker scores
     top_k: int = 5          # How many survive to the LLM
+
+
+class SelfRAGConfig(BaseModel):
+    """Check each answer for grounding and usefulness; retry when it fails."""
+    enabled: bool = True
+    max_retries: int = 1        # Extra generate / re-retrieve rounds
+
+
+class GenerationConfig(BaseModel):
+    self_rag: SelfRAGConfig = Field(default_factory=SelfRAGConfig)
 
 
 class ExtractionConfig(BaseModel):
@@ -229,6 +248,7 @@ class RAGConfig(BaseModel):
     routing: RoutingConfig = Field(default_factory=RoutingConfig)
     query_construction: QueryConstructionConfig = Field(default_factory=QueryConstructionConfig)
     reranking: RerankingConfig = Field(default_factory=RerankingConfig)
+    generation: GenerationConfig = Field(default_factory=GenerationConfig)
     extraction: ExtractionConfig = Field(default_factory=ExtractionConfig)
     chat: ChatConfig = Field(default_factory=ChatConfig)
     ui: UIConfig = Field(default_factory=UIConfig)
